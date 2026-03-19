@@ -10,7 +10,7 @@
 
 ;; Assumes that you already have glfw installed
 (let ((config (configure #:exe-name "deity"
-                         #:link '("glfw"))))
+                         #:link '("glfw" "vulkan"))))
   (compile-c config compile?)
 
   (install config install?)
