@@ -1,3 +1,4 @@
+#include <vulkan/vulkan_core.h>
 #define GLFW_INCLUDE_VULKAN
 #include <GLFW/glfw3.h>
 #include <assert.h>
@@ -12,6 +13,14 @@ typedef struct Context {
     VkSurfaceKHR surf;
     VkPhysicalDevice phy_dev;
     VkDevice dev;
+    uint32_t qf_idx;
+    VkQueue queue;
+    VkSwapchainKHR swapchain;
+    uint32_t img_cnt;
+    VkImage *img;
+    VkImageView *img_view;
+    VkFormat img_format;
+    VkExtent2D extent;
 } Context;
 
 VKAPI_ATTR VkBool32 VKAPI_CALL vk_err_cb(
@@ -82,14 +91,19 @@ void glfw_err_cb(int error, const char *desc) {
 
 // TODO: reorg
 int main(void) {
-    assert(glfwInit() && "GLFW did not init");
+    if (!glfwInit()) {
+        assert(!"GLFW did not init");
+    }
     glfwSetErrorCallback(glfw_err_cb);
 
     // A bit much, we might not need all of it
+    // Just for current testing/developing
     char space[1024 * 1024];
     Arena *arena = create_from(space, 1024 * 1024);
 
     Context ctx;
+    VkBool32 vk_ret;
+    int ret;
 
     uint32_t prop_cnt = 0;
     vkEnumerateInstanceLayerProperties(&prop_cnt, 0);
@@ -151,16 +165,116 @@ int main(void) {
         exts,
     };
 
-    assert(vkCreateInstance(&create_info, 0, &ctx.inst) == VK_SUCCESS &&
-           "Could not create a Vulkan Instance");
+    vk_ret = vkCreateInstance(&create_info, 0, &ctx.inst);
+    assert(vk_ret == VK_SUCCESS && "Could not create a Vulkan Instance");
 
     glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
     GLFWwindow *window = glfwCreateWindow(640, 480, "Deity", 0, 0);
+    assert(window && "Could not create a GLFW Window");
 
-    VkSurfaceKHR surface;
-    assert(glfwCreateWindowSurface(ctx.inst, window, 0, &surface) ==
-               VK_SUCCESS &&
-           "Could not create a Vulkan Window Surface");
+    vk_ret = glfwCreateWindowSurface(ctx.inst, window, 0, &ctx.surf);
+    assert(vk_ret == VK_SUCCESS && "Could not create a Vulkan Window Surface");
+
+    uint32_t devs_cnt = 0;
+    vkEnumeratePhysicalDevices(ctx.inst, &devs_cnt, 0);
+    VkPhysicalDevice *devs = alloc_arr(arena, devs_cnt, VkPhysicalDevice);
+    vkEnumeratePhysicalDevices(ctx.inst, &devs_cnt, devs);
+
+    // NOTE: We don't care too much about what device we have for my purposes
+    // Still might look into some heuristics
+    ctx.phy_dev = devs[0];
+    assert(ctx.phy_dev && "Could not find a Physical Device");
+
+    uint32_t qfprops_cnt = 0;
+    vkGetPhysicalDeviceQueueFamilyProperties(ctx.phy_dev, &qfprops_cnt, 0);
+    VkQueueFamilyProperties *qfprops =
+        alloc_arr(arena, qfprops_cnt, VkQueueFamilyProperties);
+    vkGetPhysicalDeviceQueueFamilyProperties(ctx.phy_dev, &qfprops_cnt,
+                                             qfprops);
+
+    ctx.qf_idx = UINT32_MAX;
+    for (size_t i = 0; i < qfprops_cnt; i++) {
+        if (qfprops[i].queueFlags & VK_QUEUE_GRAPHICS_BIT) {
+            ctx.qf_idx = i;
+            break;
+        }
+    }
+    assert(ctx.qf_idx != UINT32_MAX &&
+           "Could not query Queue Family Properties for Graphics");
+
+    ret = glfwGetPhysicalDevicePresentationSupport(ctx.inst, ctx.phy_dev,
+                                                   ctx.qf_idx);
+    assert(ret && "Could not query Queue Family Properties for Present");
+
+    const float queue_priorites[] = {1.f};
+    uint32_t queue_priorites_cnt =
+        sizeof(queue_priorites) / sizeof(*queue_priorites);
+
+    VkDeviceQueueCreateInfo queue_infos[] = {
+        {VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO, 0, 0, ctx.qf_idx,
+         queue_priorites_cnt, queue_priorites}};
+    uint32_t queue_infos_cnt = sizeof(queue_infos) / sizeof(*queue_infos);
+
+    const char *dev_exts[] = {VK_KHR_SWAPCHAIN_EXTENSION_NAME};
+    uint32_t dev_exts_cnt = sizeof(dev_exts) / sizeof(*dev_exts);
+
+    VkDeviceCreateInfo dev_info = {
+        VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
+        0,
+        0,
+        queue_infos_cnt,
+        queue_infos,
+        0,
+        0,
+        dev_exts_cnt,
+        dev_exts,
+        0,
+
+    };
+
+    vk_ret = vkCreateDevice(ctx.phy_dev, &dev_info, 0, &ctx.dev);
+    assert(vk_ret == VK_SUCCESS && "Could not create a Logical Device");
+
+    vkGetDeviceQueue(ctx.dev, ctx.qf_idx, 0, &ctx.queue);
+    assert(ctx.queue && "Could not create a Queue");
+
+    VkSurfaceCapabilitiesKHR surf_caps;
+    vk_ret = vkGetPhysicalDeviceSurfaceCapabilitiesKHR(ctx.phy_dev, ctx.surf,
+                                                       &surf_caps);
+    assert(vk_ret == VK_SUCCESS && "Could not find Surface Capabilities");
+
+    ctx.img_format = VK_FORMAT_B8G8R8A8_SRGB;
+    ctx.extent = surf_caps.currentExtent;
+    ctx.img_cnt = surf_caps.minImageCount; // TODO: For now
+
+    if (ctx.extent.width == -1 && ctx.extent.height == -1) {
+        glfwGetFramebufferSize(window, (int *)&ctx.extent.width,
+                               (int *)&ctx.extent.height);
+    }
+
+    VkSwapchainCreateInfoKHR swapchain_info = {
+        VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR,
+        0,
+        0,
+        ctx.surf,
+        ctx.img_cnt,
+        ctx.img_format,
+        VK_COLOR_SPACE_SRGB_NONLINEAR_KHR,
+        ctx.extent,
+        1,
+        VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
+        VK_SHARING_MODE_EXCLUSIVE,
+        0,
+        0,
+        surf_caps.currentTransform,
+        VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR,
+        VK_PRESENT_MODE_FIFO_KHR,
+        VK_TRUE,
+        0,
+    };
+
+    vk_ret = vkCreateSwapchainKHR(ctx.dev, &swapchain_info, 0, &ctx.swapchain);
+    assert(vk_ret == VK_SUCCESS && "Could not create a Swapchain");
 
     /* Nothing to loop so far
     while (!glfwWindowShouldClose(window)) {
@@ -168,6 +282,7 @@ int main(void) {
     }
     */
 
+    // TODO: All the destroy functions
     glfwTerminate();
     return 0;
 }
