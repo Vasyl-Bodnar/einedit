@@ -1,4 +1,3 @@
-#include <vulkan/vulkan_core.h>
 #define GLFW_INCLUDE_VULKAN
 #include <GLFW/glfw3.h>
 #include <assert.h>
@@ -132,6 +131,7 @@ VkShaderModule load_shader(Arena *arena, Context *ctx, const char *path) {
     VkShaderModule mod;
 
     FILE *file = fopen(path, "rb");
+    assert(file && "Failed to open a Shader File");
     struct stat st;
     fstat(fileno(file), &st);
 
@@ -157,8 +157,8 @@ VkShaderModule load_shader(Arena *arena, Context *ctx, const char *path) {
 
 void create_graphics_pipeline(Arena *arena, Context *ctx) {
     [[maybe_unused]] VkBool32 ret = 0;
-    VkShaderModule vert_shader = load_shader(arena, ctx, "src/shader/vert.spv");
-    VkShaderModule frag_shader = load_shader(arena, ctx, "src/shader/frag.spv");
+    VkShaderModule vert_shader = load_shader(arena, ctx, "vert.spv");
+    VkShaderModule frag_shader = load_shader(arena, ctx, "frag.spv");
 
     VkPipelineShaderStageCreateInfo shader_info[] = {
         {
