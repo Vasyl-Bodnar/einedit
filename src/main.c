@@ -33,6 +33,7 @@ typedef struct Context {
     VkPipelineLayout pipeline_lay;
     VkPipeline pipeline;
 
+    uint64_t frame_cnt;
     VkFence fence;
     VkSemaphore img_avail;
     VkSemaphore rend_done;
@@ -307,6 +308,170 @@ void create_graphics_pipeline(Arena *arena, Context *ctx) {
     vkDestroyShaderModule(ctx->dev, frag_shader, 0);
 }
 
+void create_swapchain(Arena *arena, Context *ctx) {
+    VkSurfaceCapabilitiesKHR surf_caps;
+    [[maybe_unused]] VkBool32 vk_ret =
+        vkGetPhysicalDeviceSurfaceCapabilitiesKHR(ctx->phy_dev, ctx->surf,
+                                                  &surf_caps);
+    assert(vk_ret == VK_SUCCESS && "Could not find Surface Capabilities");
+
+    ctx->img_format = VK_FORMAT_B8G8R8A8_SRGB;
+    ctx->extent = surf_caps.currentExtent;
+    ctx->img_cnt = surf_caps.minImageCount > 3 ? surf_caps.minImageCount : 3;
+
+    if (ctx->extent.width == -1 && ctx->extent.height == -1) {
+        glfwGetFramebufferSize(ctx->window, (int *)&ctx->extent.width,
+                               (int *)&ctx->extent.height);
+    }
+
+    VkSwapchainCreateInfoKHR swapchain_info = {
+        VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR,
+        0,
+        0,
+        ctx->surf,
+        ctx->img_cnt,
+        ctx->img_format,
+        VK_COLOR_SPACE_SRGB_NONLINEAR_KHR,
+        ctx->extent,
+        1,
+        VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
+        VK_SHARING_MODE_EXCLUSIVE,
+        0,
+        0,
+        surf_caps.currentTransform,
+        VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR,
+        VK_PRESENT_MODE_MAILBOX_KHR,
+        VK_TRUE,
+        0,
+    };
+
+    vk_ret =
+        vkCreateSwapchainKHR(ctx->dev, &swapchain_info, 0, &ctx->swapchain);
+    assert(vk_ret == VK_SUCCESS && "Could not create a Swapchain");
+
+    ctx->img_cnt = 0;
+    vk_ret =
+        vkGetSwapchainImagesKHR(ctx->dev, ctx->swapchain, &ctx->img_cnt, 0);
+    assert(vk_ret == VK_SUCCESS && "Could not get valid Images");
+    ctx->img = alloc_arr(arena, ctx->img_cnt, typeof(*ctx->img));
+    ctx->img_view = alloc_arr(arena, ctx->img_cnt, typeof(*ctx->img_view));
+    vk_ret = vkGetSwapchainImagesKHR(ctx->dev, ctx->swapchain, &ctx->img_cnt,
+                                     ctx->img);
+    assert(vk_ret == VK_SUCCESS && "Could not get valid Images");
+
+    for (uint32_t i = 0; i < ctx->img_cnt; i++) {
+        VkComponentMapping swizzle = {
+            VK_COMPONENT_SWIZZLE_IDENTITY,
+            VK_COMPONENT_SWIZZLE_IDENTITY,
+            VK_COMPONENT_SWIZZLE_IDENTITY,
+            VK_COMPONENT_SWIZZLE_IDENTITY,
+        };
+        VkImageSubresourceRange range = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+        VkImageViewCreateInfo view_info = {
+            VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+            0,
+            0,
+            ctx->img[i],
+            VK_IMAGE_VIEW_TYPE_2D,
+            ctx->img_format,
+            swizzle,
+            range,
+        };
+
+        vk_ret = vkCreateImageView(ctx->dev, &view_info, 0, ctx->img_view + i);
+        assert(vk_ret == VK_SUCCESS && "Could not create an Image View");
+    }
+}
+
+void update_swapchain(Context *ctx) {
+    for (uint32_t i = 0; i < ctx->img_cnt; i++) {
+        vkDestroyFramebuffer(ctx->dev, ctx->fb[i], 0);
+        vkDestroyImageView(ctx->dev, ctx->img_view[i], 0);
+    }
+    vkDestroySwapchainKHR(ctx->dev, ctx->swapchain, 0);
+
+    VkSurfaceCapabilitiesKHR surf_caps;
+    [[maybe_unused]] VkBool32 vk_ret =
+        vkGetPhysicalDeviceSurfaceCapabilitiesKHR(ctx->phy_dev, ctx->surf,
+                                                  &surf_caps);
+    assert(vk_ret == VK_SUCCESS &&
+           "Could not find updated Surface Capabilities");
+
+    ctx->extent = surf_caps.currentExtent;
+    if (ctx->extent.width == -1 && ctx->extent.height == -1) {
+        glfwGetFramebufferSize(ctx->window, (int *)&ctx->extent.width,
+                               (int *)&ctx->extent.height);
+    }
+
+    VkSwapchainCreateInfoKHR swapchain_info = {
+        VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR,
+        0,
+        0,
+        ctx->surf,
+        ctx->img_cnt,
+        ctx->img_format,
+        VK_COLOR_SPACE_SRGB_NONLINEAR_KHR,
+        ctx->extent,
+        1,
+        VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
+        VK_SHARING_MODE_EXCLUSIVE,
+        0,
+        0,
+        surf_caps.currentTransform,
+        VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR,
+        VK_PRESENT_MODE_MAILBOX_KHR,
+        VK_TRUE,
+        0,
+    };
+
+    vk_ret =
+        vkCreateSwapchainKHR(ctx->dev, &swapchain_info, 0, &ctx->swapchain);
+    assert(vk_ret == VK_SUCCESS && "Could not update a Swapchain");
+    vk_ret = vkGetSwapchainImagesKHR(ctx->dev, ctx->swapchain, &ctx->img_cnt,
+                                     ctx->img);
+    assert(vk_ret == VK_SUCCESS && "Could not get updated valid Images");
+
+    for (uint32_t i = 0; i < ctx->img_cnt; i++) {
+        VkComponentMapping swizzle = {
+            VK_COMPONENT_SWIZZLE_IDENTITY,
+            VK_COMPONENT_SWIZZLE_IDENTITY,
+            VK_COMPONENT_SWIZZLE_IDENTITY,
+            VK_COMPONENT_SWIZZLE_IDENTITY,
+        };
+        VkImageSubresourceRange range = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+        VkImageViewCreateInfo view_info = {
+            VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+            0,
+            0,
+            ctx->img[i],
+            VK_IMAGE_VIEW_TYPE_2D,
+            ctx->img_format,
+            swizzle,
+            range,
+        };
+
+        vk_ret = vkCreateImageView(ctx->dev, &view_info, 0, ctx->img_view + i);
+        assert(vk_ret == VK_SUCCESS && "Could not update an Image View");
+
+        VkImageView img_views[] = {ctx->img_view[i]};
+        uint32_t img_views_cnt = sizeof(img_views) / sizeof(*img_views);
+
+        VkFramebufferCreateInfo fb_info = {
+            VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO,
+            0,
+            0,
+            ctx->rendpass,
+            img_views_cnt,
+            img_views,
+            ctx->extent.width,
+            ctx->extent.height,
+            1};
+
+        vk_ret = vkCreateFramebuffer(ctx->dev, &fb_info, 0, ctx->fb + i);
+        assert(vk_ret == VK_SUCCESS && "Could not update a Framebuffer");
+    }
+}
+
 Context create_ctx(Arena *arena) {
     Context ctx;
     [[maybe_unused]] VkBool32 vk_ret = 0;
@@ -466,7 +631,6 @@ Context create_ctx(Arena *arena) {
         dev_exts_cnt,
         dev_exts,
         0,
-
     };
 
     vk_ret = vkCreateDevice(ctx.phy_dev, &dev_info, 0, &ctx.dev);
@@ -475,78 +639,7 @@ Context create_ctx(Arena *arena) {
     vkGetDeviceQueue(ctx.dev, ctx.qf_idx, 0, &ctx.queue);
     assert(ctx.queue && "Could not create a Queue");
 
-    VkSurfaceCapabilitiesKHR surf_caps;
-    vk_ret = vkGetPhysicalDeviceSurfaceCapabilitiesKHR(ctx.phy_dev, ctx.surf,
-                                                       &surf_caps);
-    assert(vk_ret == VK_SUCCESS && "Could not find Surface Capabilities");
-
-    ctx.img_format = VK_FORMAT_B8G8R8A8_SRGB;
-    ctx.extent = surf_caps.currentExtent;
-    // TODO: For now
-    ctx.img_cnt = surf_caps.minImageCount > 3 ? surf_caps.minImageCount : 3;
-
-    // TODO: Assuming this is what we want, have to change when we resize
-    if (ctx.extent.width == -1 && ctx.extent.height == -1) {
-        glfwGetFramebufferSize(ctx.window, (int *)&ctx.extent.width,
-                               (int *)&ctx.extent.height);
-    }
-
-    VkSwapchainCreateInfoKHR swapchain_info = {
-        VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR,
-        0,
-        0,
-        ctx.surf,
-        ctx.img_cnt,
-        ctx.img_format,
-        VK_COLOR_SPACE_SRGB_NONLINEAR_KHR,
-        ctx.extent,
-        1,
-        VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
-        VK_SHARING_MODE_EXCLUSIVE,
-        0,
-        0,
-        surf_caps.currentTransform,
-        VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR,
-        VK_PRESENT_MODE_MAILBOX_KHR,
-        VK_TRUE,
-        0,
-    };
-
-    // TODO: Swapchain will need to be recreated, thus this should be separate
-    vk_ret = vkCreateSwapchainKHR(ctx.dev, &swapchain_info, 0, &ctx.swapchain);
-    assert(vk_ret == VK_SUCCESS && "Could not create a Swapchain");
-
-    ctx.img_cnt = 0;
-    vk_ret = vkGetSwapchainImagesKHR(ctx.dev, ctx.swapchain, &ctx.img_cnt, 0);
-    assert(vk_ret == VK_SUCCESS && "Could not get valid Images");
-    ctx.img = alloc_arr(arena, ctx.img_cnt, typeof(*ctx.img));
-    ctx.img_view = alloc_arr(arena, ctx.img_cnt, typeof(*ctx.img_view));
-    vk_ret =
-        vkGetSwapchainImagesKHR(ctx.dev, ctx.swapchain, &ctx.img_cnt, ctx.img);
-    assert(vk_ret == VK_SUCCESS && "Could not get valid Images");
-
-    for (uint32_t i = 0; i < ctx.img_cnt; i++) {
-        VkComponentMapping swizzle = {
-            VK_COMPONENT_SWIZZLE_IDENTITY,
-            VK_COMPONENT_SWIZZLE_IDENTITY,
-            VK_COMPONENT_SWIZZLE_IDENTITY,
-            VK_COMPONENT_SWIZZLE_IDENTITY,
-        };
-        VkImageSubresourceRange range = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
-        VkImageViewCreateInfo view_info = {
-            VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
-            0,
-            0,
-            ctx.img[i],
-            VK_IMAGE_VIEW_TYPE_2D,
-            ctx.img_format,
-            swizzle,
-            range,
-        };
-
-        vk_ret = vkCreateImageView(ctx.dev, &view_info, 0, ctx.img_view + i);
-        assert(vk_ret == VK_SUCCESS && "Could not create an Image View");
-    }
+    create_swapchain(arena, &ctx);
 
     VkAttachmentDescription color_atts[] = {{
         0,
@@ -662,11 +755,9 @@ void destroy_ctx(Context *ctx) {
     vkDestroyCommandPool(ctx->dev, ctx->cmd_pool, 0);
     vkDestroySemaphore(ctx->dev, ctx->rend_done, 0);
     vkDestroySemaphore(ctx->dev, ctx->img_avail, 0);
-    for (uint32_t i = 0; i < ctx->img_cnt; i++) {
-        vkDestroyFramebuffer(ctx->dev, ctx->fb[i], 0);
-    }
     vkDestroyRenderPass(ctx->dev, ctx->rendpass, 0);
     for (uint32_t i = 0; i < ctx->img_cnt; i++) {
+        vkDestroyFramebuffer(ctx->dev, ctx->fb[i], 0);
         vkDestroyImageView(ctx->dev, ctx->img_view[i], 0);
     }
     vkDestroySwapchainKHR(ctx->dev, ctx->swapchain, 0);
@@ -674,6 +765,115 @@ void destroy_ctx(Context *ctx) {
     vkDestroySurfaceKHR(ctx->inst, ctx->surf, 0);
     vkDestroyDebugUtilsMessengerEXT(ctx->inst, ctx->dbg_msger, 0);
     vkDestroyInstance(ctx->inst, 0);
+}
+
+void draw(Arena *arena, Context *ctx) {
+    vkWaitForFences(ctx->dev, 1, &ctx->fence, VK_TRUE, UINT64_MAX);
+    vkResetFences(ctx->dev, 1, &ctx->fence);
+
+    uint32_t img_idx = UINT32_MAX;
+    [[maybe_unused]] VkBool32 vk_ret =
+        vkAcquireNextImageKHR(ctx->dev, ctx->swapchain, UINT64_MAX,
+                              ctx->img_avail, VK_NULL_HANDLE, &img_idx);
+    switch (vk_ret) {
+    case VK_ERROR_OUT_OF_DATE_KHR:
+        vkDeviceWaitIdle(ctx->dev);
+        update_swapchain(ctx);
+        return;
+    default:
+        assert(vk_ret == VK_SUCCESS && "Failed to acquire next Image");
+        assert(img_idx != UINT32_MAX &&
+               "Failed to acquire proper next Image Index");
+    }
+
+    vk_ret = vkResetCommandBuffer(ctx->cmd_buf, 0);
+    assert(vk_ret == VK_SUCCESS && "Failed to reset Command Buffer");
+    VkCommandBufferBeginInfo begin_info = {
+        VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO, 0, 0, 0
+
+    };
+
+    vk_ret = vkBeginCommandBuffer(ctx->cmd_buf, &begin_info);
+    assert(vk_ret == VK_SUCCESS && "Failed to begin Command Buffer");
+
+    VkOffset2D rend_off = {0, 0};
+    VkRect2D rend = {rend_off, ctx->extent};
+
+    // Simple variation of the background color
+    VkClearValue clear_vals[] = {
+        {{{0., 1., (float)(ctx->frame_cnt % 100) / 100, 1.}}}};
+    uint32_t clear_vals_cnt = sizeof(clear_vals) / sizeof(*clear_vals);
+
+    VkRenderPassBeginInfo rendpass_begin_info = {
+        VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
+        0,
+        ctx->rendpass,
+        ctx->fb[img_idx],
+        rend,
+        clear_vals_cnt,
+        clear_vals};
+
+    vkCmdBeginRenderPass(ctx->cmd_buf, &rendpass_begin_info,
+                         VK_SUBPASS_CONTENTS_INLINE);
+
+    vkCmdBindPipeline(ctx->cmd_buf, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                      ctx->pipeline);
+
+    vkCmdDraw(ctx->cmd_buf, 3, 1, 0, 0);
+
+    vkCmdEndRenderPass(ctx->cmd_buf);
+    vkEndCommandBuffer(ctx->cmd_buf);
+
+    VkCommandBuffer cmd_bufs[] = {ctx->cmd_buf};
+    uint32_t cmd_bufs_cnt = sizeof(cmd_bufs) / sizeof(*cmd_bufs);
+
+    VkSemaphore img_avails[] = {ctx->img_avail};
+    uint32_t img_avails_cnt = sizeof(img_avails) / sizeof(*img_avails);
+
+    VkSemaphore rend_dones[] = {ctx->rend_done};
+    uint32_t rend_dones_cnt = sizeof(rend_dones) / sizeof(*rend_dones);
+
+    VkPipelineStageFlags stage_flags[] = {
+        VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT};
+
+    VkSubmitInfo submit_info = {VK_STRUCTURE_TYPE_SUBMIT_INFO,
+                                0,
+                                img_avails_cnt,
+                                img_avails,
+                                stage_flags,
+                                cmd_bufs_cnt,
+                                cmd_bufs,
+                                rend_dones_cnt,
+                                rend_dones
+
+    };
+
+    vk_ret = vkQueueSubmit(ctx->queue, 1, &submit_info, ctx->fence);
+    assert(vk_ret == VK_SUCCESS && "Failed to Submit in Queue");
+
+    VkSwapchainKHR swapchains[] = {ctx->swapchain};
+    uint32_t swapchains_cnt = sizeof(swapchains) / sizeof(*swapchains);
+
+    VkPresentInfoKHR present_info = {VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
+                                     0,
+                                     rend_dones_cnt,
+                                     rend_dones,
+                                     swapchains_cnt,
+                                     swapchains,
+                                     &img_idx,
+                                     0};
+
+    vk_ret = vkQueuePresentKHR(ctx->queue, &present_info);
+    switch (vk_ret) {
+    case VK_ERROR_OUT_OF_DATE_KHR:
+        vkDeviceWaitIdle(ctx->dev);
+        update_swapchain(ctx);
+        break;
+    default:
+        assert(vk_ret == VK_SUCCESS && "Failed to Present in Queue");
+    }
+
+    ctx->frame_cnt += 1;
 }
 
 int main(void) {
@@ -690,106 +890,10 @@ int main(void) {
     glfwSetErrorCallback(glfw_err_cb);
 
     Context ctx = create_ctx(arena);
+    ctx.frame_cnt = 0;
 
     while (!glfwWindowShouldClose(ctx.window)) {
-        vkWaitForFences(ctx.dev, 1, &ctx.fence, VK_TRUE, UINT64_MAX);
-        vkResetFences(ctx.dev, 1, &ctx.fence);
-
-        uint32_t img_idx = UINT32_MAX;
-        vk_ret = vkAcquireNextImageKHR(ctx.dev, ctx.swapchain, UINT64_MAX,
-                                       ctx.img_avail, VK_NULL_HANDLE, &img_idx);
-        switch (vk_ret) {
-        case VK_ERROR_OUT_OF_DATE_KHR:
-            // TODO: Resize
-        default:
-            assert(vk_ret == VK_SUCCESS && "Failed to acquire next Image");
-            assert(img_idx != UINT32_MAX &&
-                   "Failed to acquire proper next Image Index");
-        }
-
-        vk_ret = vkResetCommandBuffer(ctx.cmd_buf, 0);
-        assert(vk_ret == VK_SUCCESS && "Failed to reset Command Buffer");
-        VkCommandBufferBeginInfo begin_info = {
-            VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO, 0, 0, 0
-
-        };
-
-        vk_ret = vkBeginCommandBuffer(ctx.cmd_buf, &begin_info);
-        assert(vk_ret == VK_SUCCESS && "Failed to begin Command Buffer");
-
-        VkOffset2D rend_off = {0, 0};
-        VkRect2D rend = {rend_off, ctx.extent};
-
-        VkClearValue clear_vals[] = {{{{0, 1, 0, 1}}}};
-        uint32_t clear_vals_cnt = sizeof(clear_vals) / sizeof(*clear_vals);
-
-        VkRenderPassBeginInfo rendpass_begin_info = {
-            VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
-            0,
-            ctx.rendpass,
-            ctx.fb[img_idx],
-            rend,
-            clear_vals_cnt,
-            clear_vals};
-
-        vkCmdBeginRenderPass(ctx.cmd_buf, &rendpass_begin_info,
-                             VK_SUBPASS_CONTENTS_INLINE);
-
-        vkCmdBindPipeline(ctx.cmd_buf, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                          ctx.pipeline);
-
-        vkCmdDraw(ctx.cmd_buf, 3, 1, 0, 0);
-
-        vkCmdEndRenderPass(ctx.cmd_buf);
-        vkEndCommandBuffer(ctx.cmd_buf);
-
-        VkCommandBuffer cmd_bufs[] = {ctx.cmd_buf};
-        uint32_t cmd_bufs_cnt = sizeof(cmd_bufs) / sizeof(*cmd_bufs);
-
-        VkSemaphore img_avails[] = {ctx.img_avail};
-        uint32_t img_avails_cnt = sizeof(img_avails) / sizeof(*img_avails);
-
-        VkSemaphore rend_dones[] = {ctx.rend_done};
-        uint32_t rend_dones_cnt = sizeof(rend_dones) / sizeof(*rend_dones);
-
-        VkPipelineStageFlags stage_flags[] = {
-            VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT};
-
-        VkSubmitInfo submit_info = {VK_STRUCTURE_TYPE_SUBMIT_INFO,
-                                    0,
-                                    img_avails_cnt,
-                                    img_avails,
-                                    stage_flags,
-                                    cmd_bufs_cnt,
-                                    cmd_bufs,
-                                    rend_dones_cnt,
-                                    rend_dones
-
-        };
-
-        vk_ret = vkQueueSubmit(ctx.queue, 1, &submit_info, ctx.fence);
-        assert(vk_ret == VK_SUCCESS && "Failed to Submit in Queue");
-
-        VkSwapchainKHR swapchains[] = {ctx.swapchain};
-        uint32_t swapchains_cnt = sizeof(swapchains) / sizeof(*swapchains);
-
-        VkPresentInfoKHR present_info = {VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
-                                         0,
-                                         rend_dones_cnt,
-                                         rend_dones,
-                                         swapchains_cnt,
-                                         swapchains,
-                                         &img_idx,
-                                         0};
-
-        vk_ret = vkQueuePresentKHR(ctx.queue, &present_info);
-        switch (vk_ret) {
-        case VK_ERROR_OUT_OF_DATE_KHR:
-            // TODO: Resize
-        default:
-            assert(vk_ret == VK_SUCCESS && "Failed to Present in Queue");
-        }
-
+        draw(arena, &ctx);
         glfwWaitEvents();
     }
 
