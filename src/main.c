@@ -23,14 +23,24 @@ typedef struct Context {
     VkExtent2D extent;
 } Context;
 
-VKAPI_ATTR VkBool32 VKAPI_CALL vk_err_cb(
+VKAPI_ATTR VkBool32 VKAPI_CALL vk_dbg_cb(
     VkDebugUtilsMessageSeverityFlagBitsEXT severity,
     VkDebugUtilsMessageSeverityFlagsEXT type,
     const VkDebugUtilsMessengerCallbackDataEXT *cb_data, void *user_data) {
-    printf("(Validation Layer) Vulkan Error: %s\n", cb_data->pMessage);
+    const char *ssevere[] = {
+        [VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT] = "Error",
+        [VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT] = "Warning",
+        [VK_DEBUG_UTILS_MESSAGE_SEVERITY_VERBOSE_BIT_EXT] = "Noise"};
+    const char *stype[] = {
+        [VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT] = "General",
+        [VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT] = "Validation",
+        [VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT] = "Performance"};
+    fprintf(stderr, "Vulkan %s %s: %s\n", stype[type], ssevere[severity],
+            cb_data->pMessage);
     return VK_FALSE;
 }
 
+// TODO: Consider setting up vulkan allocator with this
 typedef struct Arena {
     size_t size;
     size_t cur;
@@ -115,7 +125,7 @@ int main(void) {
 
     int prop_flag = 0;
     for (uint32_t i = 0; i < prop_cnt; i++) {
-        if (memcmp(layers[0], props[i].layerName, strlen(layers[0]))) {
+        if (!memcmp(layers[0], props[i].layerName, strlen(layers[0]))) {
             prop_flag = 1;
             break;
         }
@@ -129,7 +139,7 @@ int main(void) {
 
     int ext_flag = 1;
     for (uint32_t i = 0; i < exts_cnt; i++) {
-        if (memcmp(dbg_ext, exts[i], strlen(dbg_ext))) {
+        if (!memcmp(dbg_ext, exts[i], strlen(dbg_ext))) {
             ext_flag = 0;
             break;
         }
@@ -167,6 +177,43 @@ int main(void) {
 
     vk_ret = vkCreateInstance(&create_info, 0, &ctx.inst);
     assert(vk_ret == VK_SUCCESS && "Could not create a Vulkan Instance");
+
+    VkDebugUtilsMessageSeverityFlagsEXT msg_severity =
+        VK_DEBUG_UTILS_MESSAGE_SEVERITY_VERBOSE_BIT_EXT |
+        VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT |
+        VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT;
+
+    VkDebugUtilsMessageTypeFlagsEXT msg_type =
+        VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT |
+        VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT |
+        VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT;
+
+    VkDebugUtilsMessengerCreateInfoEXT dbg_info = {
+        VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT,
+        0,
+        0,
+        msg_severity,
+        msg_type,
+        vk_dbg_cb,
+        0};
+
+    PFN_vkCreateDebugUtilsMessengerEXT vkCreateDebugUtilsMessengerEXT =
+        (PFN_vkCreateDebugUtilsMessengerEXT)vkGetInstanceProcAddr(
+            ctx.inst, "vkCreateDebugUtilsMessengerEXT");
+    assert(
+        vkCreateDebugUtilsMessengerEXT &&
+        "Could not get Procedure Address for vkCreateDebugUtilsMessengerEXT");
+
+    PFN_vkDestroyDebugUtilsMessengerEXT vkDestroyDebugUtilsMessengerEXT =
+        (PFN_vkDestroyDebugUtilsMessengerEXT)vkGetInstanceProcAddr(
+            ctx.inst, "vkDestroyDebugUtilsMessengerEXT");
+    assert(
+        vkDestroyDebugUtilsMessengerEXT &&
+        "Could not get Procedure Address for vkDestroyDebugUtilsMessengerEXT");
+
+    VkDebugUtilsMessengerEXT dbg_msger;
+    vk_ret = vkCreateDebugUtilsMessengerEXT(ctx.inst, &dbg_info, 0, &dbg_msger);
+    assert(vk_ret == VK_SUCCESS && "Could not create a Debug Messenger");
 
     glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
     GLFWwindow *window = glfwCreateWindow(640, 480, "Deity", 0, 0);
@@ -245,8 +292,10 @@ int main(void) {
 
     ctx.img_format = VK_FORMAT_B8G8R8A8_SRGB;
     ctx.extent = surf_caps.currentExtent;
-    ctx.img_cnt = surf_caps.minImageCount; // TODO: For now
+    // TODO: For now
+    ctx.img_cnt = surf_caps.minImageCount > 3 ? surf_caps.minImageCount : 3;
 
+    // TODO: Assuming this is what we want, have to change when we resize
     if (ctx.extent.width == -1 && ctx.extent.height == -1) {
         glfwGetFramebufferSize(window, (int *)&ctx.extent.width,
                                (int *)&ctx.extent.height);
@@ -268,7 +317,7 @@ int main(void) {
         0,
         surf_caps.currentTransform,
         VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR,
-        VK_PRESENT_MODE_FIFO_KHR,
+        VK_PRESENT_MODE_MAILBOX_KHR,
         VK_TRUE,
         0,
     };
@@ -282,7 +331,11 @@ int main(void) {
     }
     */
 
-    // TODO: All the destroy functions
+    vkDestroySwapchainKHR(ctx.dev, ctx.swapchain, 0);
+    vkDestroyDevice(ctx.dev, 0);
+    vkDestroySurfaceKHR(ctx.inst, ctx.surf, 0);
+    vkDestroyDebugUtilsMessengerEXT(ctx.inst, dbg_msger, 0);
+    vkDestroyInstance(ctx.inst, 0);
     glfwTerminate();
     return 0;
 }
