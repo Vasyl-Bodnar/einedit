@@ -1,7 +1,7 @@
 [
     {
       "directory": "/$HOME/Projects/C/dfcc",
-      "command": "gcc -std=c23 -c src/*.c",
+      "command": "gcc -std=gnu23 -c src/*.c",
       "file": "src/*.c"
     }
 ]
