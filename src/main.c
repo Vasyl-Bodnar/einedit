@@ -84,8 +84,8 @@ Arena *create_from(void *space, size_t init_size) {
         memset(arena, 0, sizeof(*arena) + 8);
         arena->size = 8;
     } else {
-        memset(arena, 0, sizeof(*arena) + init_size);
-        arena->size = init_size;
+        memset(arena, 0, init_size - sizeof(*arena));
+        arena->size = init_size - sizeof(*arena);
     }
     return arena;
 }
@@ -147,7 +147,8 @@ VkShaderModule load_shader(Arena *arena, Context *ctx, const char *path) {
 
     };
 
-    VkBool32 res = vkCreateShaderModule(ctx->dev, &mod_info, 0, &mod);
+    [[maybe_unused]] VkBool32 res =
+        vkCreateShaderModule(ctx->dev, &mod_info, 0, &mod);
     assert(res == VK_SUCCESS && "Failed to create a Shader Module");
 
     fclose(file);
@@ -155,7 +156,7 @@ VkShaderModule load_shader(Arena *arena, Context *ctx, const char *path) {
 }
 
 void create_graphics_pipeline(Arena *arena, Context *ctx) {
-    VkBool32 ret = 0;
+    [[maybe_unused]] VkBool32 ret = 0;
     VkShaderModule vert_shader = load_shader(arena, ctx, "src/shader/vert.spv");
     VkShaderModule frag_shader = load_shader(arena, ctx, "src/shader/frag.spv");
 
@@ -308,8 +309,8 @@ void create_graphics_pipeline(Arena *arena, Context *ctx) {
 
 Context create_ctx(Arena *arena) {
     Context ctx;
-    VkBool32 vk_ret;
-    int ret;
+    [[maybe_unused]] VkBool32 vk_ret = 0;
+    [[maybe_unused]] int ret = 0;
 
     uint32_t prop_cnt = 0;
     vkEnumerateInstanceLayerProperties(&prop_cnt, 0);
@@ -319,7 +320,7 @@ Context create_ctx(Arena *arena) {
     const char *layers[] = {"VK_LAYER_KHRONOS_validation"};
     uint32_t layers_cnt = sizeof(layers) / sizeof(*layers);
 
-    int prop_flag = 0;
+    [[maybe_unused]] int prop_flag = 0;
     for (uint32_t i = 0; i < prop_cnt; i++) {
         if (!memcmp(layers[0], props[i].layerName, strlen(layers[0]))) {
             prop_flag = 1;
@@ -405,7 +406,7 @@ Context create_ctx(Arena *arena) {
     assert(vk_ret == VK_SUCCESS && "Could not create a Debug Messenger");
 
     glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
-    ctx.window = glfwCreateWindow(640, 480, "Deity", 0, 0);
+    ctx.window = glfwCreateWindow(640, 480, "Vulkan's A Sham", 0, 0);
     assert(ctx.window && "not create a GLFW Window");
 
     vk_ret = glfwCreateWindowSurface(ctx.inst, ctx.window, 0, &ctx.surf);
@@ -681,6 +682,8 @@ int main(void) {
     char space[1024 * 1024];
     Arena *arena = create_from(space, 1024 * 1024);
 
+    [[maybe_unused]] VkBool32 vk_ret = 0;
+
     if (!glfwInit()) {
         assert(!"GLFW did not init");
     }
@@ -688,11 +691,109 @@ int main(void) {
 
     Context ctx = create_ctx(arena);
 
-    /*
     while (!glfwWindowShouldClose(ctx.window)) {
-        glfwPollEvents();
+        vkWaitForFences(ctx.dev, 1, &ctx.fence, VK_TRUE, UINT64_MAX);
+        vkResetFences(ctx.dev, 1, &ctx.fence);
+
+        uint32_t img_idx = UINT32_MAX;
+        vk_ret = vkAcquireNextImageKHR(ctx.dev, ctx.swapchain, UINT64_MAX,
+                                       ctx.img_avail, VK_NULL_HANDLE, &img_idx);
+        switch (vk_ret) {
+        case VK_ERROR_OUT_OF_DATE_KHR:
+            // TODO: Resize
+        default:
+            assert(vk_ret == VK_SUCCESS && "Failed to acquire next Image");
+            assert(img_idx != UINT32_MAX &&
+                   "Failed to acquire proper next Image Index");
+        }
+
+        vk_ret = vkResetCommandBuffer(ctx.cmd_buf, 0);
+        assert(vk_ret == VK_SUCCESS && "Failed to reset Command Buffer");
+        VkCommandBufferBeginInfo begin_info = {
+            VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO, 0, 0, 0
+
+        };
+
+        vk_ret = vkBeginCommandBuffer(ctx.cmd_buf, &begin_info);
+        assert(vk_ret == VK_SUCCESS && "Failed to begin Command Buffer");
+
+        VkOffset2D rend_off = {0, 0};
+        VkRect2D rend = {rend_off, ctx.extent};
+
+        VkClearValue clear_vals[] = {{{{0, 1, 0, 1}}}};
+        uint32_t clear_vals_cnt = sizeof(clear_vals) / sizeof(*clear_vals);
+
+        VkRenderPassBeginInfo rendpass_begin_info = {
+            VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
+            0,
+            ctx.rendpass,
+            ctx.fb[img_idx],
+            rend,
+            clear_vals_cnt,
+            clear_vals};
+
+        vkCmdBeginRenderPass(ctx.cmd_buf, &rendpass_begin_info,
+                             VK_SUBPASS_CONTENTS_INLINE);
+
+        vkCmdBindPipeline(ctx.cmd_buf, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                          ctx.pipeline);
+
+        vkCmdDraw(ctx.cmd_buf, 3, 1, 0, 0);
+
+        vkCmdEndRenderPass(ctx.cmd_buf);
+        vkEndCommandBuffer(ctx.cmd_buf);
+
+        VkCommandBuffer cmd_bufs[] = {ctx.cmd_buf};
+        uint32_t cmd_bufs_cnt = sizeof(cmd_bufs) / sizeof(*cmd_bufs);
+
+        VkSemaphore img_avails[] = {ctx.img_avail};
+        uint32_t img_avails_cnt = sizeof(img_avails) / sizeof(*img_avails);
+
+        VkSemaphore rend_dones[] = {ctx.rend_done};
+        uint32_t rend_dones_cnt = sizeof(rend_dones) / sizeof(*rend_dones);
+
+        VkPipelineStageFlags stage_flags[] = {
+            VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT};
+
+        VkSubmitInfo submit_info = {VK_STRUCTURE_TYPE_SUBMIT_INFO,
+                                    0,
+                                    img_avails_cnt,
+                                    img_avails,
+                                    stage_flags,
+                                    cmd_bufs_cnt,
+                                    cmd_bufs,
+                                    rend_dones_cnt,
+                                    rend_dones
+
+        };
+
+        vk_ret = vkQueueSubmit(ctx.queue, 1, &submit_info, ctx.fence);
+        assert(vk_ret == VK_SUCCESS && "Failed to Submit in Queue");
+
+        VkSwapchainKHR swapchains[] = {ctx.swapchain};
+        uint32_t swapchains_cnt = sizeof(swapchains) / sizeof(*swapchains);
+
+        VkPresentInfoKHR present_info = {VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
+                                         0,
+                                         rend_dones_cnt,
+                                         rend_dones,
+                                         swapchains_cnt,
+                                         swapchains,
+                                         &img_idx,
+                                         0};
+
+        vk_ret = vkQueuePresentKHR(ctx.queue, &present_info);
+        switch (vk_ret) {
+        case VK_ERROR_OUT_OF_DATE_KHR:
+            // TODO: Resize
+        default:
+            assert(vk_ret == VK_SUCCESS && "Failed to Present in Queue");
+        }
+
+        glfwWaitEvents();
     }
-    */
+
+    vkDeviceWaitIdle(ctx.dev);
 
     destroy_ctx(&ctx);
     glfwTerminate();

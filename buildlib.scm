@@ -197,7 +197,7 @@
                     (include-name #f) (include '()) (link '()) (link-path '()))
   (let* ((command (make-real-command '("b2sum" "sha512sum" "sha256sum" "sha1sum" "md5sum")
                                      '("doas" "sudo") '("rmdir") '("rm") '("cp")))
-         (extra-args (append (list optimization debug wall)
+         (extra-args (append (filter (lambda (s) (not (string= s ""))) (list optimization debug wall))
                              (map (lambda (der)
                                     (string-append "-D" (if (symbol? der)
                                                             (symbol->string der) der)))
