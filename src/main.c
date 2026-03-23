@@ -1,3 +1,6 @@
+/* This Source Code Form is subject to the terms of the Mozilla Public
+   License, v. 2.0. If a copy of the MPL was not distributed with this
+   file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 #define GLFW_INCLUDE_VULKAN
 #include <GLFW/glfw3.h>
 #include <assert.h>
@@ -58,18 +61,6 @@ VKAPI_ATTR VkBool32 VKAPI_CALL vk_dbg_cb(
     return VK_FALSE;
 }
 
-const char *vertex_shader =
-    "#version 450\n"
-    "vec2 positions[3] ="
-    "vec2[](vec2(0.0, -0.5), vec2(0.5, 0.5), vec2(-0.5, 0.5)); "
-    "void main() {gl_Position = vec4(positions[gl_VertexIndex], 0.0, 1.0);} ";
-
-const char *fragment_shader =
-    "#version 450\n"
-    "layout(location=0) out vec4 out_color;"
-    "void main() {out_color = vec4(1.0, 0.0, 0.0, 1.0);} ";
-
-// TODO: Consider setting up vulkan allocator with this
 typedef struct Arena {
     size_t size;
     size_t cur;
@@ -520,9 +511,9 @@ Context create_ctx(Arena *arena) {
 
     VkApplicationInfo app_info = {VK_STRUCTURE_TYPE_APPLICATION_INFO,
                                   0,
-                                  "Deity",
+                                  "EinEdit",
                                   1,
-                                  "Deity",
+                                  "EinEdit",
                                   1,
                                   VK_API_VERSION_1_3};
 
@@ -571,7 +562,7 @@ Context create_ctx(Arena *arena) {
     assert(vk_ret == VK_SUCCESS && "Could not create a Debug Messenger");
 
     glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
-    ctx.window = glfwCreateWindow(640, 480, "Vulkan's A Sham", 0, 0);
+    ctx.window = glfwCreateWindow(640, 480, "EinEdit", 0, 0);
     assert(ctx.window && "not create a GLFW Window");
 
     vk_ret = glfwCreateWindowSurface(ctx.inst, ctx.window, 0, &ctx.surf);
@@ -738,6 +729,8 @@ Context create_ctx(Arena *arena) {
     vk_ret = vkCreateFence(ctx.dev, &fence_info, 0, &ctx.fence);
     assert(vk_ret == VK_SUCCESS && "Could not create a Fence");
 
+    ctx.frame_cnt = 0;
+
     return ctx;
 }
 
@@ -748,6 +741,9 @@ void destroy_ctx(Context *ctx) {
     assert(
         vkDestroyDebugUtilsMessengerEXT &&
         "Could not get Procedure Address for vkDestroyDebugUtilsMessengerEXT");
+
+    // Must wait until GPU is free
+    vkDeviceWaitIdle(ctx->dev);
 
     vkDestroyFence(ctx->dev, ctx->fence, 0);
     vkDestroyPipeline(ctx->dev, ctx->pipeline, 0);
@@ -879,10 +875,8 @@ void draw(Arena *arena, Context *ctx) {
 int main(void) {
     // A bit much, we might not need all of it, or might even need more
     // For now, just keep it for current testing/developing
-    char space[1024 * 1024];
-    Arena *arena = create_from(space, 1024 * 1024);
-
-    [[maybe_unused]] VkBool32 vk_ret = 0;
+    char space[1024 * 10];
+    Arena *arena = create_from(space, 1024 * 10);
 
     if (!glfwInit()) {
         assert(!"GLFW did not init");
@@ -890,14 +884,11 @@ int main(void) {
     glfwSetErrorCallback(glfw_err_cb);
 
     Context ctx = create_ctx(arena);
-    ctx.frame_cnt = 0;
 
     while (!glfwWindowShouldClose(ctx.window)) {
         draw(arena, &ctx);
         glfwWaitEvents();
     }
-
-    vkDeviceWaitIdle(ctx.dev);
 
     destroy_ctx(&ctx);
     glfwTerminate();

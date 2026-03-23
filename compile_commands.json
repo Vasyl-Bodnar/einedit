@@ -1,6 +1,6 @@
 [
     {
-      "directory": "/$HOME/Projects/C/dfcc",
+      "directory": "/$HOME/Projects/C/einedit",
       "command": "gcc -std=gnu23 -c src/*.c",
       "file": "src/*.c"
     }
