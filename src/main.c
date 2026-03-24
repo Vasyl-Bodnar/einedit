@@ -12,7 +12,7 @@
 #include <sys/fcntl.h>
 #include <sys/stat.h>
 
-// Current code is based on rafael-abreu-english.blogspot.com and vkguide.dev
+// Current code is based mostly on rafael-abreu-english.blogspot.com
 typedef struct Context {
     GLFWwindow *window;
 
