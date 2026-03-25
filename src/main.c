@@ -41,25 +41,30 @@ typedef struct Context {
     VkSemaphore img_avail;
     VkSemaphore rend_done;
     VkDebugUtilsMessengerEXT dbg_msger;
-
 } Context;
 
-VKAPI_ATTR VkBool32 VKAPI_CALL vk_dbg_cb(
-    VkDebugUtilsMessageSeverityFlagBitsEXT severity,
-    VkDebugUtilsMessageSeverityFlagsEXT type,
-    const VkDebugUtilsMessengerCallbackDataEXT *cb_data, void *user_data) {
-    const char *ssevere[] = {
-        [VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT] = "Error",
-        [VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT] = "Warning",
-        [VK_DEBUG_UTILS_MESSAGE_SEVERITY_VERBOSE_BIT_EXT] = "Noise"};
-    const char *stype[] = {
-        [VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT] = "General",
-        [VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT] = "Validation",
-        [VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT] = "Performance"};
-    fprintf(stderr, "Vulkan %s %s: %s\n", stype[type], ssevere[severity],
-            cb_data->pMessage);
-    return VK_FALSE;
-}
+enum font_type {
+    FontEnd = 0x30000000,
+    FontShort = 0x20000000,
+    FontNormal = 0x00000000,
+    FontWide = 0x10000000,
+};
+
+typedef struct FontSegment {
+    uint32_t start; // font_type included in the highest nibble
+    uint32_t end;
+    uint32_t off;
+} FontSegment;
+
+// segments and data are directly mapped to the binary format
+// ascii and type are extracted for the fast path
+typedef struct FontLUT {
+    enum font_type type; // ascii type
+    char *ascii;
+    size_t segment_cnt;
+    FontSegment *segment;
+    char *data;
+} FontLUT;
 
 typedef struct Arena {
     size_t size;
@@ -75,7 +80,7 @@ Arena *create_from(void *space, size_t init_size) {
         memset(arena, 0, sizeof(*arena) + 8);
         arena->size = 8;
     } else {
-        memset(arena, 0, init_size - sizeof(*arena));
+        memset(arena, 0, init_size);
         arena->size = init_size - sizeof(*arena);
     }
     return arena;
@@ -115,15 +120,89 @@ void free_all(Arena *arena) { arena->cur = 0; }
 
 void delete(Arena *arena) { free(arena); }
 
+VKAPI_ATTR VkBool32 VKAPI_CALL vk_dbg_cb(
+    VkDebugUtilsMessageSeverityFlagBitsEXT severity,
+    VkDebugUtilsMessageSeverityFlagsEXT type,
+    const VkDebugUtilsMessengerCallbackDataEXT *cb_data, void *user_data) {
+    const char *ssevere;
+    switch (severity) {
+    case VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT:
+        ssevere = "Error";
+        break;
+    case VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT:
+        ssevere = "Warning";
+        break;
+    case VK_DEBUG_UTILS_MESSAGE_SEVERITY_VERBOSE_BIT_EXT:
+        ssevere = "Noise";
+        break;
+    default:
+        ssevere = "Unknown";
+        break;
+    }
+    const char *stype;
+    switch (type) {
+    case VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT:
+        stype = "General";
+        break;
+    case VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT:
+        stype = "Validation";
+        break;
+    case VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT:
+        stype = "Performance";
+        break;
+    default:
+        stype = "Unknown";
+        break;
+    }
+    fprintf(stderr, "Vulkan %s %s: %s\n", stype, ssevere, cb_data->pMessage);
+    return VK_FALSE;
+}
+
 void glfw_err_cb(int error, const char *desc) {
     fprintf(stderr, "GLFW Error: %s\n", desc);
 }
 
+FontLUT load_font(Arena *arena, const char *path) {
+    FontLUT font;
+    size_t res;
+
+    FILE *file = fopen(path, "rb");
+    assert(file && "Failed to open a Font File");
+
+    struct stat st;
+    res = fstat(fileno(file), &st);
+    assert(!res && "Failed to stat the Font File");
+
+    char *bin = alloc_arr(arena, st.st_size, char);
+    res = fread(bin, 1, st.st_size, file);
+    assert(res == st.st_size && "Failed to read the entire Font File");
+    assert(!memcmp(bin, "HEXFONT0", 8) && "Failed to recognize a Font File");
+
+    bin += 8;
+    font.segment = (void *)bin;
+
+    size_t segments_count = 0;
+    while (font.segment[segments_count].start != FontEnd) {
+        segments_count += 1;
+    }
+
+    font.segment_cnt = segments_count;
+    font.data = (void *)(font.segment + segments_count + 1);
+
+    // Assume ascii is fully represented
+    font.type = font.segment->start & 0xFF000000;
+    font.ascii = font.data;
+
+    return font;
+}
+
 VkShaderModule load_shader(Arena *arena, Context *ctx, const char *path) {
     VkShaderModule mod;
+    [[maybe_unused]] VkBool32 res;
 
     FILE *file = fopen(path, "rb");
     assert(file && "Failed to open a Shader File");
+
     struct stat st;
     fstat(fileno(file), &st);
 
@@ -139,8 +218,7 @@ VkShaderModule load_shader(Arena *arena, Context *ctx, const char *path) {
 
     };
 
-    [[maybe_unused]] VkBool32 res =
-        vkCreateShaderModule(ctx->dev, &mod_info, 0, &mod);
+    res = vkCreateShaderModule(ctx->dev, &mod_info, 0, &mod);
     assert(res == VK_SUCCESS && "Failed to create a Shader Module");
 
     fclose(file);
@@ -301,9 +379,10 @@ void create_graphics_pipeline(Arena *arena, Context *ctx) {
 
 void create_swapchain(Arena *arena, Context *ctx) {
     VkSurfaceCapabilitiesKHR surf_caps;
-    [[maybe_unused]] VkBool32 vk_ret =
-        vkGetPhysicalDeviceSurfaceCapabilitiesKHR(ctx->phy_dev, ctx->surf,
-                                                  &surf_caps);
+    [[maybe_unused]] VkBool32 vk_ret;
+
+    vk_ret = vkGetPhysicalDeviceSurfaceCapabilitiesKHR(ctx->phy_dev, ctx->surf,
+                                                       &surf_caps);
     assert(vk_ret == VK_SUCCESS && "Could not find Surface Capabilities");
 
     ctx->img_format = VK_FORMAT_B8G8R8A8_SRGB;
@@ -375,6 +454,7 @@ void create_swapchain(Arena *arena, Context *ctx) {
 }
 
 void update_swapchain(Context *ctx) {
+    [[maybe_unused]] VkBool32 vk_ret;
     for (uint32_t i = 0; i < ctx->img_cnt; i++) {
         vkDestroyFramebuffer(ctx->dev, ctx->fb[i], 0);
         vkDestroyImageView(ctx->dev, ctx->img_view[i], 0);
@@ -382,9 +462,8 @@ void update_swapchain(Context *ctx) {
     vkDestroySwapchainKHR(ctx->dev, ctx->swapchain, 0);
 
     VkSurfaceCapabilitiesKHR surf_caps;
-    [[maybe_unused]] VkBool32 vk_ret =
-        vkGetPhysicalDeviceSurfaceCapabilitiesKHR(ctx->phy_dev, ctx->surf,
-                                                  &surf_caps);
+    vk_ret = vkGetPhysicalDeviceSurfaceCapabilitiesKHR(ctx->phy_dev, ctx->surf,
+                                                       &surf_caps);
     assert(vk_ret == VK_SUCCESS &&
            "Could not find updated Surface Capabilities");
 
@@ -764,13 +843,13 @@ void destroy_ctx(Context *ctx) {
 }
 
 void draw(Arena *arena, Context *ctx) {
+    [[maybe_unused]] VkBool32 vk_ret;
     vkWaitForFences(ctx->dev, 1, &ctx->fence, VK_TRUE, UINT64_MAX);
     vkResetFences(ctx->dev, 1, &ctx->fence);
 
     uint32_t img_idx = UINT32_MAX;
-    [[maybe_unused]] VkBool32 vk_ret =
-        vkAcquireNextImageKHR(ctx->dev, ctx->swapchain, UINT64_MAX,
-                              ctx->img_avail, VK_NULL_HANDLE, &img_idx);
+    vk_ret = vkAcquireNextImageKHR(ctx->dev, ctx->swapchain, UINT64_MAX,
+                                   ctx->img_avail, VK_NULL_HANDLE, &img_idx);
     switch (vk_ret) {
     case VK_ERROR_OUT_OF_DATE_KHR:
         vkDeviceWaitIdle(ctx->dev);
@@ -872,7 +951,7 @@ void draw(Arena *arena, Context *ctx) {
     ctx->frame_cnt += 1;
 }
 
-int main(void) {
+int vk_main(void) {
     // A bit much, we might not need all of it, or might even need more
     // For now, just keep it for current testing/developing
     char space[1024 * 10];
@@ -892,5 +971,22 @@ int main(void) {
 
     destroy_ctx(&ctx);
     glfwTerminate();
+    return 0;
+}
+
+int main(void) {
+    Arena *arena = new (1024 * 1024);
+
+    FontLUT font = load_font(arena, "unscii-16.bin");
+    for (size_t i = 0; i < font.segment_cnt; i++) {
+        printf("%x %x %x\n", font.segment[i].start, font.segment[i].end,
+               font.segment[i].off);
+    }
+
+    printf("%x\n", font.type);
+    for (size_t i = 0; i < 128 * 16; i++) {
+        printf("%d ", font.ascii[i]);
+    }
+
     return 0;
 }

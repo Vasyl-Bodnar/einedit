@@ -42,7 +42,8 @@
 ;; (00000030 ends the ranges with invalid 30 byte)
 ;; (00000000 as padding)
 ;; (repeat bitmaps of a 8, 16, or 32 byte value depending on row-type per range
-;;         the number of bitmaps is then simply (range-end - range-start))
+;;         the number of bitmaps is then simply (range-end - range-start)
+;;         These values are big endian)
 (call-with-input-file (string-append filename ".hex")
   (lambda (hex)
     (call-with-output-file (string-append filename ".bin")
@@ -66,7 +67,8 @@
                             (new-code-point (string->number (car halves) 16))
                             (new-row-type (count->row-type (string-length (cadr halves))))
                             (bitmap-number (string->number (cadr halves) 16)))
-                       (bytevector-uint-set! number-bv 0 bitmap-number (endianness little) (row-type->bytes new-row-type))
+                       ;; Bytes are big endian for now
+                       (bytevector-uint-set! number-bv 0 bitmap-number (endianness big) (row-type->bytes new-row-type))
                        (put-bytevector content-port number-bv 0 (row-type->bytes new-row-type))
                        (unless (and (= new-code-point code-point)
                                     (eq? new-row-type row-type))
