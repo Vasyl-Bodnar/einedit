@@ -10,13 +10,13 @@
 
 (define filename (cadr (command-line)))
 
-;; Twice the real one
-(define (row-type->count row-type)
+(define (row-type->bytes row-type)
   (case row-type
-    ((wide)   64)
-    ((normal) 32)
-    ((short)  16)))
+    ((wide)   32)
+    ((normal) 16)
+    ((short)  8)))
 
+;; Twice the real one
 (define (count->row-type count)
   (case count
     ((64) 'wide)
@@ -29,10 +29,11 @@
     ((normal) #x00000000)
     ((short)  #x20000000)))
 
-(define (put-two-num-bv bv tmp-bv ein zwei)
-  (bytevector-u32-set! tmp-bv 0 ein (endianness little))
-  (bytevector-u32-set! tmp-bv 4 zwei (endianness little))
-  (put-bytevector bv tmp-bv 0 8))
+(define (put-nums-bv bv tmp-bv nums)
+  (do ((nums nums (cdr nums))
+       (idx 0 (+ idx 4)))
+      ((null? nums) (put-bytevector bv tmp-bv 0 idx))
+    (bytevector-u32-set! tmp-bv idx (car nums) (endianness little))))
 
 ;; Simple format
 ;; HEXFONT0
@@ -54,26 +55,30 @@
                    (do ((line (get-line hex) (get-line hex))
                         (code-point 0)
                         (row-type 'normal)
-                        (range-start 0) (range-end 0 code-point))
+                        (range-start 0) (range-end 0 code-point)
+                        (offset 0))
                        ((eof-object? line)
-                        (put-two-num-bv bin number-bv
-                                        (logior (row-type->hinibble row-type) range-start)
-                                        range-end))
+                        (put-nums-bv bin number-bv
+                                     (list (logior (row-type->hinibble row-type) range-start)
+                                           range-end
+                                           offset)))
                      (let* ((halves (string-split line #\:))
                             (new-code-point (string->number (car halves) 16))
                             (new-row-type (count->row-type (string-length (cadr halves))))
                             (bitmap-number (string->number (cadr halves) 16)))
-                       (bytevector-uint-set! number-bv 0 bitmap-number (endianness little) (/ (row-type->count new-row-type) 2))
-                       (put-bytevector content-port number-bv 0 (/ (row-type->count new-row-type) 2))
+                       (bytevector-uint-set! number-bv 0 bitmap-number (endianness little) (row-type->bytes new-row-type))
+                       (put-bytevector content-port number-bv 0 (row-type->bytes new-row-type))
                        (unless (and (= new-code-point code-point)
                                     (eq? new-row-type row-type))
                          ;; Header is built here
-                         (put-two-num-bv bin number-bv
-                                         (logior (row-type->hinibble row-type) range-start)
-                                         range-end)
+                         (put-nums-bv bin number-bv
+                                      (list (logior (row-type->hinibble row-type) range-start)
+                                            range-end
+                                            offset))
                          (set! range-start new-code-point)
                          (set! row-type new-row-type))
-                       (set! code-point (1+ new-code-point))))))))
+                       (set! code-point (1+ new-code-point))
+                       (set! offset (+ (row-type->bytes new-row-type) offset))))))))
           ;; The header ends with (little-endian) value #x00000030, which is invalid for any range-start value
-          (put-two-num-bv bin number-bv #x30000000 #x00000000)
+          (put-nums-bv bin number-bv '(#x30000000 #x00000000 #x00000000))
           (put-bytevector bin content-bv))))))
