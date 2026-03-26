@@ -175,6 +175,20 @@ void glfw_err_cb(int error, const char *desc) {
     fprintf(stderr, "GLFW Error: %s\n", desc);
 }
 
+size_t font_type_to_bytes(enum font_type font_type) {
+    switch (font_type) {
+    case FontEnd:
+        return 0;
+    case FontShort:
+        return 8;
+    case FontNormal:
+        return 16;
+    case FontWide:
+        return 32;
+    }
+    return 0;
+}
+
 FontLUT load_font(Arena *arena, const char *path) {
     FontLUT font;
     size_t res;
@@ -1247,10 +1261,19 @@ int main(void) {
 
     Context ctx = create_ctx(arena);
 
-    uint32_t texture[] = {0xCC000000, 0xFF0000FF, 0xFF0000FF,
-                          0xCC00000,  0xAAAAAA00, 0xAAAAAA00};
-    VkDeviceSize texture_size = sizeof(texture);
-    copy_texture(&ctx, texture, texture_size, (VkExtent3D){3, 2, 1});
+    FontLUT font = load_font(arena, "unscii-16.bin");
+
+    uint32_t *texture = alloc_arr(arena, 8 * 16, uint32_t);
+    VkDeviceSize texture_size = 8 * 16 * sizeof(*texture);
+
+    size_t lett = font_type_to_bytes(font.type);
+    for (size_t i = lett * 50, j = 0; j < lett; i++, j++) {
+        for (size_t k = 0; k < 8; k++) {
+            texture[k + j * 8] =
+                (font.ascii[i] & (1 << (8 - k))) ? 0xFF000000 : 0x00000000;
+        }
+    }
+    copy_texture(&ctx, texture, texture_size, (VkExtent3D){8, 16, 1});
 
     while (!glfwWindowShouldClose(ctx.window)) {
         draw(arena, &ctx);
