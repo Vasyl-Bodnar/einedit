@@ -2,6 +2,7 @@
 ;; License, v. 2.0. If a copy of the MPL was not distributed with this
 ;; file, You can obtain one at http://mozilla.org/MPL/2.0/.
 
+;; TODO: Add noise as the lowest priority messages for debugging
 (define-module (buildlib)
   #:autoload (ice-9 optargs) (define*)
   #:autoload (ice-9 ftw) (nftw scandir)
@@ -11,7 +12,7 @@
   #:autoload (ice-9 popen) (open-pipe*)
   #:autoload (srfi srfi-1) (delete-duplicates lset<=)
   #:autoload (srfi srfi-9) (define-record-type)
-  #:export (configure compile-c install clean print-config config-error fail warng info))
+  #:export (configure run-external compile-c install clean print-config config-error fail warng info))
 
 (define-record-type <c-compiler>
   (make-c-compiler name archiver args incl-args lib-args lib-type hash)
@@ -44,13 +45,14 @@
   (keep-configs cache-keep-configs))
 
 (define-record-type <command>
-  (make-command hash sudo rmdir rm cp)
+  (make-command hash sudo rmdir rm cp mv)
   command?
   (hash command-hash)
   (sudo command-sudo)
   (rmdir command-rmdir)
   (rm command-rm)
-  (cp command-cp))
+  (cp command-cp)
+  (mv command-mv))
 
 (define-record-type <config>
   (make-config c-compiler paths cache commands verbosity error)
@@ -179,14 +181,15 @@
                meta
                (in-vicinity meta compiler-hash))))
 
-(define (make-real-command hash sudo rmdir rm cp)
+(define (make-real-command hash sudo rmdir rm cp mv)
   (let ((f (lambda (name) (search-path (parse-path (getenv "PATH")) name))))
     (let ((hash (filter f hash))
           (sudo (filter f sudo))
           (rmdir (filter f rmdir))
           (rm (filter f rm))
-          (cp (filter f cp)))
-      (make-command hash sudo rmdir rm cp))))
+          (cp (filter f cp))
+          (mv (filter f mv)))
+      (make-command hash sudo rmdir rm cp mv))))
 
 ;; lib-type is 'none, 'static, 'dynamic, or 'both
 (define* (configure #:optional (conditional #t) #:key (c-compiler "cc") (c-archiver "ar")
@@ -196,7 +199,7 @@
                     (optimization "-O0") (debug "-g") (wall "-Wall") (derive '())
                     (include-name #f) (include '()) (link '()) (link-path '()))
   (let* ((command (make-real-command '("b2sum" "sha512sum" "sha256sum" "sha1sum" "md5sum")
-                                     '("doas" "sudo") '("rmdir") '("rm") '("cp")))
+                                     '("doas" "sudo") '("rmdir") '("rm") '("cp") '("mv")))
          (extra-args (append (filter (lambda (s) (not (string= s ""))) (list optimization debug wall))
                              (map (lambda (der)
                                     (string-append "-D" (if (symbol? der)
@@ -222,6 +225,8 @@
       (fail config 'no-rm "No rm in PATH!?"))
     (when (null? (command-cp command))
       (fail config 'no-cp "No cp in PATH!?"))
+    (when (null? (command-mv command))
+      (fail config 'no-mv "No mv in PATH!?"))
 
     (unless (equal? lib-type 'none)
       (when (and (memq lib-type '(static both))
@@ -255,6 +260,20 @@
       (info config "Creating the obj directory")
       (mkdir (path-obj-build path)))
     config))
+
+(define* (run-external config #:optional (conditional #t) #:key (name #f) (args '()) (outputs '()) (build-dir #f))
+  (when (and conditional name)
+    (let ((command-mv (car (command-mv (config-commands config))))
+          (build-dir (if build-dir build-dir (path-build (config-paths config))))
+          (result (status:exit-val (apply system* (append (list name) args)))))
+      (if (= result 0)
+          (begin
+            (info config "Ran External Command: " name)
+            (unless (null? outputs)
+              (let ((result (status:exit-val (apply system* (append (list command-mv "-t" build-dir) outputs)))))
+                (unless (= result 0)
+                  (warng config "Could not move outputs to build. Please check arguments and permissions")))))
+          (warng config "External Command Did Not Succeed " name "\nReturned " result)))))
 
 (define (hash-c-file config source-file)
   (let ((c-compiler (config-c-compiler config))

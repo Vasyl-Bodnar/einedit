@@ -4,11 +4,15 @@
 (add-to-load-path ".")
 (use-modules (buildlib))
 
-(define windows? (memq #t (map (lambda (x) (equal? "windows" x)) (command-line))))
-(define release? (memq #t (map (lambda (x) (equal? "release" x)) (command-line))))
-(define install? (memq #t (map (lambda (x) (equal? "install" x)) (command-line))))
-(define clean? (memq #t (map (lambda (x) (equal? "clean" x)) (command-line))))
+(define (check-arg name) (memq #t (map (lambda (x) (equal? name x)) (command-line))))
+(define windows? (check-arg "windows"))
+(define release? (check-arg "release"))
+(define install? (check-arg "install"))
+(define clean? (check-arg "clean"))
 (define compile? (not clean?))
+(define external? (check-arg "external"))
+(define shader? (or external? (check-arg "shader")))
+(define font? (or external? (check-arg "font")))
 
 ;; Assumes that you already have glfw and vulkan installed
 ;; TODO: Currently the windows part needs manual link-path and include
@@ -31,6 +35,11 @@
                           #:optimization "-O3" #:debug "" #:derive '(NDEBUG))
                (configure #:exe-name "einedit"
                           #:link '("glfw" "vulkan"))))))
+  (run-external config shader? #:name "glslc" #:args '("src/shader/basic.vert" "-o" "vert.spv") #:outputs '("vert.spv"))
+  (run-external config shader? #:name "glslc" #:args '("src/shader/basic.frag" "-o" "frag.spv") #:outputs '("frag.spv"))
+  (run-external config font? #:name "asset/hex-to-bin.scm" #:args '("asset/unscii-8") #:outputs '("asset/unscii-8.bin"))
+  (run-external config font? #:name "asset/hex-to-bin.scm" #:args '("asset/unscii-16") #:outputs '("asset/unscii-16.bin"))
+
   (compile-c config compile?)
 
   (install config install?)
