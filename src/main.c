@@ -115,8 +115,7 @@ typedef struct FontSegment {
 // segments and data are directly mapped to the binary format
 // ascii and type are extracted for the fast path
 typedef struct FontLUT {
-    enum font_type type; // ascii type
-    char *ascii;
+    enum font_type type; // ascii type (excluding null)
     size_t segment_cnt;
     FontSegment *segment;
     char *data;
@@ -355,11 +354,10 @@ FontLUT load_font(Arena **arena, const char *path) {
     }
 
     font.segment_cnt = segments_count;
-    font.data = (void *)(font.segment + segments_count + 1);
+    font.data = (void *)(&font.segment[segments_count].end);
 
-    // Assume ascii is fully represented
-    font.type = font.segment->start & 0xFF000000;
-    font.ascii = font.data;
+    // Assume ascii is always represented
+    font.type = font.segment[1].start & 0xFF000000;
 
     return font;
 }
@@ -619,6 +617,41 @@ VkBool32 create_img_view(Context *ctx, VkImageView *img_view, VkImage img,
     };
 
     return vkCreateImageView(ctx->dev, &view_info, 0, img_view);
+}
+
+void create_buf(Context *ctx, VkDeviceSize size, VkBufferUsageFlags use,
+                VkMemoryPropertyFlags props, VkBuffer *buf,
+                VkDeviceMemory *buf_mem) {
+    [[maybe_unused]] VkBool32 vk_ret = 0;
+    VkBufferCreateInfo buf_info = {VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+                                   0,
+                                   0,
+                                   size,
+                                   VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                                   VK_SHARING_MODE_EXCLUSIVE,
+                                   0,
+                                   0};
+
+    vk_ret = vkCreateBuffer(ctx->dev, &buf_info, 0, buf);
+    assert(vk_ret == VK_SUCCESS && "Could not create a Buffer");
+
+    VkMemoryRequirements req = {0};
+    vkGetBufferMemoryRequirements(ctx->dev, *buf, &req);
+
+    uint32_t mem_type_idx = find_vkmem_type(ctx, req.memoryTypeBits, props);
+
+    VkMemoryAllocateInfo alloc_info = {
+        VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+        0,
+        req.size,
+        mem_type_idx,
+    };
+
+    vk_ret = vkAllocateMemory(ctx->dev, &alloc_info, 0, buf_mem);
+    assert(vk_ret == VK_SUCCESS && "Could not alloc Staging Buffer Memory");
+
+    vk_ret = vkBindBufferMemory(ctx->dev, *buf, *buf_mem, 0);
+    assert(vk_ret == VK_SUCCESS && "Could not bind Staging Buffer to Memory");
 }
 
 VkBool32 create_rendpass(Arena **arena, Context *ctx) {
@@ -1091,51 +1124,16 @@ void init_ctx(Arena **arena, Context *ctx) {
     ctx->frame_cnt = 0;
 }
 
-void destroy_ctx(Context *ctx) {
-    // Must wait until GPU is free
-    empty_destroyer(ctx);
-}
-
-void alloc_mem(Context *ctx, VkDeviceMemory *mem) {}
-
 void copy_texture(Context *ctx, uint32_t *tex, uint32_t tex_size,
                   VkExtent3D extent) {
     [[maybe_unused]] VkBool32 vk_ret;
     VkBuffer staging_buf;
     VkDeviceMemory staging_buf_mem;
 
-    VkBufferCreateInfo staging_buf_info = {VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
-                                           0,
-                                           0,
-                                           tex_size,
-                                           VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-                                           VK_SHARING_MODE_EXCLUSIVE,
-                                           0,
-                                           0};
-
-    vk_ret = vkCreateBuffer(ctx->dev, &staging_buf_info, 0, &staging_buf);
-    assert(vk_ret == VK_SUCCESS && "Could not create Staging Buffer");
-
-    VkMemoryRequirements req = {0};
-    vkGetBufferMemoryRequirements(ctx->dev, staging_buf, &req);
-
-    uint32_t mem_type_idx =
-        find_vkmem_type(ctx, req.memoryTypeBits,
-                        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
-                            VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
-
-    VkMemoryAllocateInfo alloc_info = {
-        VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
-        0,
-        req.size,
-        mem_type_idx,
-    };
-
-    vk_ret = vkAllocateMemory(ctx->dev, &alloc_info, 0, &staging_buf_mem);
-    assert(vk_ret == VK_SUCCESS && "Could not alloc Staging Buffer Memory");
-
-    vk_ret = vkBindBufferMemory(ctx->dev, staging_buf, staging_buf_mem, 0);
-    assert(vk_ret == VK_SUCCESS && "Could not bind Staging Buffer to Memory");
+    create_buf(ctx, tex_size, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+               VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                   VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+               &staging_buf, &staging_buf_mem);
 
     void *data = 0;
     vk_ret = vkMapMemory(ctx->dev, staging_buf_mem, 0, tex_size, 0, &data);
@@ -1165,10 +1163,11 @@ void copy_texture(Context *ctx, uint32_t *tex, uint32_t tex_size,
     assert(vk_ret == VK_SUCCESS && "Could not create an Image");
     push_destroyer(ctx, DestroyImage, Handle, ctx->tex_img);
 
+    VkMemoryRequirements req = {0};
     vkGetImageMemoryRequirements(ctx->dev, ctx->tex_img, &req);
-    mem_type_idx = find_vkmem_type(ctx, req.memoryTypeBits,
-                                   VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-    alloc_info = (VkMemoryAllocateInfo){
+    uint32_t mem_type_idx = find_vkmem_type(
+        ctx, req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+    VkMemoryAllocateInfo alloc_info = (VkMemoryAllocateInfo){
         VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
         0,
         req.size,
@@ -1400,19 +1399,19 @@ int main(void) {
     alloc_destroyer(&arena, &ctx, 1000);
     init_ctx(&arena, &ctx);
 
-    FontLUT font = load_font(&arena, "unscii-8.bin");
-
-    uint32_t *texture = alloc_arr(&arena, 8 * 8, uint32_t);
-    VkDeviceSize texture_size = 8 * 8 * sizeof(*texture);
-
+    FontLUT font = load_font(&arena, "unscii-16.bin");
     size_t lett = font_type_to_bytes(font.type);
+
+    uint32_t *texture = alloc_arr(&arena, 8 * lett, uint32_t);
+    VkDeviceSize texture_size = 8 * lett * sizeof(*texture);
+
     for (size_t i = lett * 33, j = 0; j < lett; i++, j++) {
         for (size_t k = 0; k < 8; k++) {
             texture[k + j * 8] =
-                (font.ascii[i] & (1 << (8 - k))) ? 0xFF000000 : 0x00000000;
+                (font.data[i] & (1 << (8 - k))) ? 0xFF000000 : 0x00000000;
         }
     }
-    copy_texture(&ctx, texture, texture_size, (VkExtent3D){8, 8, 1});
+    copy_texture(&ctx, texture, texture_size, (VkExtent3D){8, lett, 1});
 
     while (!glfwWindowShouldClose(ctx.window)) {
         draw(arena, &ctx);

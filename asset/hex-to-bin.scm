@@ -40,10 +40,12 @@
 ;; (repeat (4 byte range-start, where highest nibble is row-type, inclusive)
 ;;         (4 byte range-end, exclusive))
 ;; (00000030 ends the ranges with invalid 30 byte)
-;; (00000000 as padding)
 ;; (repeat bitmaps of a 8, 16, or 32 byte value depending on row-type per range
 ;;         the number of bitmaps is then simply (range-end - range-start)
 ;;         These values are big endian)
+;;
+;; Note that all of ascii (including null) should be the same size to make it easier on the rendering
+;; This is not handled in the parser currently, so I modified unscii-8 to have 8 byte null
 (call-with-input-file (string-append filename ".hex")
   (lambda (hex)
     (call-with-output-file (string-append filename ".bin")
@@ -82,5 +84,5 @@
                        (set! code-point (1+ new-code-point))
                        (set! offset (+ (row-type->bytes new-row-type) offset))))))))
           ;; The header ends with (little-endian) value #x00000030, which is invalid for any range-start value
-          (put-nums-bv bin number-bv '(#x30000000 #x00000000 #x00000000))
+          (put-nums-bv bin number-bv '(#x30000000))
           (put-bytevector bin content-bv))))))
