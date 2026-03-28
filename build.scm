@@ -14,29 +14,26 @@
 (define shader? (or external? (check-arg "shader")))
 (define font? (or external? (check-arg "font")))
 
+;; Windows may require specified path
+(define glfw-win-path (getenv "GLFW_WINDOWS_PATH"))
+(define vulkan-win-path (getenv "VULKAN_WINDOWS_PATH"))
+
 ;; Assumes that you already have glfw and vulkan installed
-;; TODO: Currently the windows part needs manual link-path and include
-;; I excluded them from this repo
 (let ((config
        (if windows?
-           (if release?
-               (configure #:c-compiler "x86_64-w64-mingw32-gcc" #:exe-name "einedit"
-                          #:link '("glfw3" "vulkan-1" "gdi32" "user32")
-                          #:link-path '()
-                          #:include '()
-                          #:optimization "-O3" #:debug "" #:derive '(NDEBUG))
-               (configure #:c-compiler "x86_64-w64-mingw32-gcc" #:exe-name "einedit"
-                          #:link '("glfw3" "vulkan-1" "gdi32" "user32")
-                          #:link-path '()
-                          #:include '()))
-           (if release?
-               (configure #:exe-name "einedit"
-                          #:link '("glfw" "vulkan")
-                          #:optimization "-O3" #:debug "" #:derive '(NDEBUG))
-               (configure #:exe-name "einedit"
-                          #:link '("glfw" "vulkan"))))))
+           (configure #:c-compiler "x86_64-w64-mingw32-gcc" #:exe-name "einedit"
+                      #:link '("glfw3" "vulkan-1" "gdi32" "user32")
+                      #:link-path (list (in-vicinity glfw-win-path "lib-mingw-w64") (in-vicinity vulkan-win-path "Lib32"))
+                      #:include (list (in-vicinity glfw-win-path "include") (in-vicinity vulkan-win-path "Include"))
+                      #:verbosity 4
+                      #:optimization (if release? "-O3" "-O0") #:debug (if release? "" "-g") #:derive (if release? '(NDEBUG) '()))
+           (configure #:exe-name "einedit"
+                      #:link '("glfw" "vulkan")
+                      #:optimization (if release? "-O3" "-O0") #:debug (if release? "" "-g") #:derive (if release? '(NDEBUG) '())))))
+
   (run-external config shader? #:name "glslc" #:args '("src/shader/basic.vert" "-o" "vert.spv") #:outputs '("vert.spv"))
   (run-external config shader? #:name "glslc" #:args '("src/shader/basic.frag" "-o" "frag.spv") #:outputs '("frag.spv"))
+
   (run-external config font? #:name "asset/hex-to-bin.scm" #:args '("asset/unscii-8") #:outputs '("asset/unscii-8.bin"))
   (run-external config font? #:name "asset/hex-to-bin.scm" #:args '("asset/unscii-16") #:outputs '("asset/unscii-16.bin"))
 
