@@ -14,6 +14,7 @@
 #include <sys/stat.h>
 
 #define DESC_LAY_CNT 1
+#define MAX_FRAME_IDX 2
 
 PFN_vkCreateDebugUtilsMessengerEXT vkCreateDebugUtilsMessenger;
 PFN_vkDestroyDebugUtilsMessengerEXT vkDestroyDebugUtilsMessenger;
@@ -77,7 +78,7 @@ typedef struct Context {
     VkRenderPass rendpass;
     VkFramebuffer *fb;
     VkCommandPool cmd_pool;
-    VkCommandBuffer cmd_buf;
+    VkCommandBuffer cmd_buf[MAX_FRAME_IDX];
     VkPipelineLayout pipeline_lay;
     VkPipeline pipeline;
 
@@ -90,10 +91,16 @@ typedef struct Context {
     VkImageView tex_img_view;
     VkSampler tex_sampler;
 
+    VkBuffer staging_vert_buf;
+    VkDeviceMemory staging_vert_mem;
+    VkBuffer vert_buf;
+    VkDeviceMemory vert_mem;
+
+    uint32_t frame_idx;
     uint64_t frame_cnt;
-    VkFence fence;
-    VkSemaphore img_avail;
-    VkSemaphore rend_done;
+    VkFence fence[MAX_FRAME_IDX];
+    VkSemaphore img_avail[MAX_FRAME_IDX];
+    VkSemaphore *rend_done;
     VkDebugUtilsMessengerEXT dbg_msger;
 
     Destroyer *destroyer;
@@ -829,13 +836,15 @@ void update_swapchain(Context *ctx) {
 
 void create_desc(Context *ctx) {
     [[maybe_unused]] VkBool32 vk_ret = 0;
-    VkDescriptorSetLayoutBinding desc_lay_bind = {
-        0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1,
-        VK_SHADER_STAGE_FRAGMENT_BIT, 0};
+    VkDescriptorSetLayoutBinding desc_lay_binds[] = {
+        {0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1,
+         VK_SHADER_STAGE_FRAGMENT_BIT, 0}};
+    uint32_t desc_lay_binds_cnt =
+        sizeof(desc_lay_binds) / sizeof(*desc_lay_binds);
 
     VkDescriptorSetLayoutCreateInfo desc_lay_info = {
-        VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, 0, 0, 1,
-        &desc_lay_bind};
+        VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, 0, 0,
+        desc_lay_binds_cnt, desc_lay_binds};
 
     vk_ret =
         vkCreateDescriptorSetLayout(ctx->dev, &desc_lay_info, 0, ctx->desc_lay);
@@ -1079,11 +1088,18 @@ void init_ctx(Arena **arena, Context *ctx) {
     VkSemaphoreCreateInfo sem_info = {VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO,
                                       0, 0};
 
-    vk_ret = vkCreateSemaphore(ctx->dev, &sem_info, 0, &ctx->img_avail);
-    vk_ret |= vkCreateSemaphore(ctx->dev, &sem_info, 0, &ctx->rend_done);
-    assert(vk_ret == VK_SUCCESS && "Could not create Semaphores");
-    push_destroyer(ctx, DestroySemaphore, Handle, ctx->img_avail);
-    push_destroyer(ctx, DestroySemaphore, Handle, ctx->rend_done);
+    for (size_t i = 0; i < MAX_FRAME_IDX; i++) {
+        vk_ret = vkCreateSemaphore(ctx->dev, &sem_info, 0, ctx->img_avail + i);
+        assert(vk_ret == VK_SUCCESS && "Could not create Semaphores");
+        push_destroyer(ctx, DestroySemaphore, Handle, ctx->img_avail[i]);
+    }
+
+    ctx->rend_done = alloc_arr(arena, ctx->img_cnt, typeof(*ctx->rend_done));
+    for (size_t i = 0; i < ctx->img_cnt; i++) {
+        vk_ret |= vkCreateSemaphore(ctx->dev, &sem_info, 0, ctx->rend_done + i);
+        assert(vk_ret == VK_SUCCESS && "Could not create Semaphores");
+        push_destroyer(ctx, DestroySemaphore, Handle, ctx->rend_done[i]);
+    }
 
     VkCommandPoolCreateInfo cmd_pool_info = {
         VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
@@ -1101,10 +1117,10 @@ void init_ctx(Arena **arena, Context *ctx) {
         0,
         ctx->cmd_pool,
         VK_COMMAND_BUFFER_LEVEL_PRIMARY,
-        1,
+        ctx->img_cnt,
     };
 
-    vk_ret = vkAllocateCommandBuffers(ctx->dev, &cmd_buf_info, &ctx->cmd_buf);
+    vk_ret = vkAllocateCommandBuffers(ctx->dev, &cmd_buf_info, ctx->cmd_buf);
     assert(vk_ret == VK_SUCCESS && "Could not alloc a Command Buffer");
 
     create_desc(ctx);
@@ -1117,11 +1133,14 @@ void init_ctx(Arena **arena, Context *ctx) {
         VK_FENCE_CREATE_SIGNALED_BIT,
     };
 
-    vk_ret = vkCreateFence(ctx->dev, &fence_info, 0, &ctx->fence);
-    assert(vk_ret == VK_SUCCESS && "Could not create a Fence");
-    push_destroyer(ctx, DestroyFence, Handle, ctx->fence);
+    for (size_t i = 0; i < MAX_FRAME_IDX; i++) {
+        vk_ret = vkCreateFence(ctx->dev, &fence_info, 0, ctx->fence + i);
+        assert(vk_ret == VK_SUCCESS && "Could not create a Fence");
+        push_destroyer(ctx, DestroyFence, Handle, ctx->fence[i]);
+    }
 
     ctx->frame_cnt = 0;
+    ctx->frame_idx = 0;
 }
 
 void copy_texture(Context *ctx, uint32_t *tex, uint32_t tex_size,
@@ -1272,12 +1291,17 @@ void copy_texture(Context *ctx, uint32_t *tex, uint32_t tex_size,
 
 void draw(Arena *arena, Context *ctx) {
     [[maybe_unused]] VkBool32 vk_ret;
-    vkWaitForFences(ctx->dev, 1, &ctx->fence, VK_TRUE, UINT64_MAX);
-    vkResetFences(ctx->dev, 1, &ctx->fence);
+
+    vkWaitForFences(ctx->dev, 1, ctx->fence + ctx->frame_idx, VK_TRUE,
+                    UINT64_MAX);
 
     uint32_t img_idx = UINT32_MAX;
     vk_ret = vkAcquireNextImageKHR(ctx->dev, ctx->swapchain, UINT64_MAX,
-                                   ctx->img_avail, VK_NULL_HANDLE, &img_idx);
+                                   ctx->img_avail[ctx->frame_idx],
+                                   VK_NULL_HANDLE, &img_idx);
+
+    vkResetFences(ctx->dev, 1, ctx->fence + ctx->frame_idx);
+
     switch (vk_ret) {
     case VK_ERROR_OUT_OF_DATE_KHR:
         vkDeviceWaitIdle(ctx->dev);
@@ -1289,14 +1313,12 @@ void draw(Arena *arena, Context *ctx) {
                "Could not acquire proper next Image Index");
     }
 
-    vk_ret = vkResetCommandBuffer(ctx->cmd_buf, 0);
+    vk_ret = vkResetCommandBuffer(ctx->cmd_buf[ctx->frame_idx], 0);
     assert(vk_ret == VK_SUCCESS && "Could not reset Command Buffer");
     VkCommandBufferBeginInfo begin_info = {
-        VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO, 0, 0, 0
+        VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO, 0, 0, 0};
 
-    };
-
-    vk_ret = vkBeginCommandBuffer(ctx->cmd_buf, &begin_info);
+    vk_ret = vkBeginCommandBuffer(ctx->cmd_buf[ctx->frame_idx], &begin_info);
     assert(vk_ret == VK_SUCCESS && "Could not begin Command Buffer");
 
     VkOffset2D rend_off = {0, 0};
@@ -1316,30 +1338,31 @@ void draw(Arena *arena, Context *ctx) {
         clear_vals_cnt,
         clear_vals};
 
-    vkCmdBeginRenderPass(ctx->cmd_buf, &rendpass_begin_info,
+    vkCmdBeginRenderPass(ctx->cmd_buf[ctx->frame_idx], &rendpass_begin_info,
                          VK_SUBPASS_CONTENTS_INLINE);
 
-    vkCmdBindPipeline(ctx->cmd_buf, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                      ctx->pipeline);
+    vkCmdBindPipeline(ctx->cmd_buf[ctx->frame_idx],
+                      VK_PIPELINE_BIND_POINT_GRAPHICS, ctx->pipeline);
 
     VkDescriptorSet descs[] = {ctx->desc};
     uint32_t descs_cnt = sizeof(descs) / sizeof(*descs);
-    vkCmdBindDescriptorSets(ctx->cmd_buf, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                            ctx->pipeline_lay, 0, descs_cnt, descs, 0, 0);
+    vkCmdBindDescriptorSets(ctx->cmd_buf[ctx->frame_idx],
+                            VK_PIPELINE_BIND_POINT_GRAPHICS, ctx->pipeline_lay,
+                            0, descs_cnt, descs, 0, 0);
 
     // TODO: Have vertices at runtime not hardcoded
-    vkCmdDraw(ctx->cmd_buf, 6, 1, 0, 0);
+    vkCmdDraw(ctx->cmd_buf[ctx->frame_idx], 6, 1, 0, 0);
 
-    vkCmdEndRenderPass(ctx->cmd_buf);
-    vkEndCommandBuffer(ctx->cmd_buf);
+    vkCmdEndRenderPass(ctx->cmd_buf[ctx->frame_idx]);
+    vkEndCommandBuffer(ctx->cmd_buf[ctx->frame_idx]);
 
-    VkCommandBuffer cmd_bufs[] = {ctx->cmd_buf};
+    VkCommandBuffer cmd_bufs[] = {ctx->cmd_buf[ctx->frame_idx]};
     uint32_t cmd_bufs_cnt = sizeof(cmd_bufs) / sizeof(*cmd_bufs);
 
-    VkSemaphore img_avails[] = {ctx->img_avail};
+    VkSemaphore img_avails[] = {ctx->img_avail[ctx->frame_idx]};
     uint32_t img_avails_cnt = sizeof(img_avails) / sizeof(*img_avails);
 
-    VkSemaphore rend_dones[] = {ctx->rend_done};
+    VkSemaphore rend_dones[] = {ctx->rend_done[img_idx]};
     uint32_t rend_dones_cnt = sizeof(rend_dones) / sizeof(*rend_dones);
 
     VkPipelineStageFlags stage_flags[] = {
@@ -1357,7 +1380,8 @@ void draw(Arena *arena, Context *ctx) {
 
     };
 
-    vk_ret = vkQueueSubmit(ctx->queue, 1, &submit_info, ctx->fence);
+    vk_ret =
+        vkQueueSubmit(ctx->queue, 1, &submit_info, ctx->fence[ctx->frame_idx]);
     assert(vk_ret == VK_SUCCESS && "Could not Submit in Queue");
 
     VkSwapchainKHR swapchains[] = {ctx->swapchain};
@@ -1383,6 +1407,7 @@ void draw(Arena *arena, Context *ctx) {
     }
 
     ctx->frame_cnt += 1;
+    ctx->frame_idx = (ctx->frame_idx + 1) % MAX_FRAME_IDX;
 }
 
 int main(void) {
@@ -1396,10 +1421,11 @@ int main(void) {
     }
     glfwSetErrorCallback(glfw_err_cb);
 
+    // We assume we will not have more than 1000 Vulkan objects
     alloc_destroyer(&arena, &ctx, 1000);
     init_ctx(&arena, &ctx);
 
-    FontLUT font = load_font(&arena, "unscii-16.bin");
+    FontLUT font = load_font(&arena, "unscii-8.bin");
     size_t lett = font_type_to_bytes(font.type);
 
     uint32_t *texture = alloc_arr(&arena, 8 * lett, uint32_t);

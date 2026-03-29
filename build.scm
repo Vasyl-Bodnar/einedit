@@ -25,7 +25,6 @@
                       #:link '("glfw3" "vulkan-1" "gdi32" "user32")
                       #:link-path (list (in-vicinity glfw-win-path "lib-mingw-w64") (in-vicinity vulkan-win-path "Lib32"))
                       #:include (list (in-vicinity glfw-win-path "include") (in-vicinity vulkan-win-path "Include"))
-                      #:verbosity 4
                       #:optimization (if release? "-O3" "-O0") #:debug (if release? "" "-g") #:derive (if release? '(NDEBUG) '()))
            (configure #:exe-name "einedit"
                       #:link '("glfw" "vulkan")
