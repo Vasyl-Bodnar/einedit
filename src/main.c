@@ -29,6 +29,7 @@ enum destroy_type {
     DestroyPipeline,
     DestroyPipelineLayout,
     DestroyImage,
+    DestroyBuffer,
     FreeMemory,
     DestroySampler,
     DestroyDescriptorPool,
@@ -95,6 +96,7 @@ typedef struct Context {
     VkDeviceMemory staging_vert_mem;
     VkBuffer vert_buf;
     VkDeviceMemory vert_mem;
+    uint32_t vert_cnt;
 
     uint32_t frame_idx;
     uint64_t frame_cnt;
@@ -283,6 +285,9 @@ void pop_destroyer(Context *ctx) {
     case DestroyImage:
         vkDestroyImage(ctx->dev, obj, 0);
         break;
+    case DestroyBuffer:
+        vkDestroyBuffer(ctx->dev, obj, 0);
+        break;
     case FreeMemory:
         vkFreeMemory(ctx->dev, obj, 0);
         break;
@@ -424,15 +429,28 @@ void create_graphics_pipeline(Arena **arena, Context *ctx) {
         }};
     uint32_t shader_info_cnt = sizeof(shader_info) / sizeof(*shader_info);
 
-    // We do not create verteces yet
+    uint32_t stride = sizeof(float) * 4;
+
+    VkVertexInputBindingDescription vert_bind_descs[] = {
+        {0, stride, VK_VERTEX_INPUT_RATE_VERTEX}};
+    uint32_t vert_bind_descs_cnt =
+        sizeof(vert_bind_descs) / sizeof(*vert_bind_descs);
+
+    VkVertexInputAttributeDescription vert_attr_descs[] = {
+        {0, 0, VK_FORMAT_R32G32_SFLOAT, 0},
+        {1, 0, VK_FORMAT_R32G32_SFLOAT, sizeof(float) * 2},
+    };
+    uint32_t vert_attr_descs_cnt =
+        sizeof(vert_attr_descs) / sizeof(*vert_attr_descs);
+
     VkPipelineVertexInputStateCreateInfo vert_input_info = {
         VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
         0,
         0,
-        0,
-        0,
-        0,
-        0,
+        vert_bind_descs_cnt,
+        vert_bind_descs,
+        vert_attr_descs_cnt,
+        vert_attr_descs,
     };
 
     VkPipelineInputAssemblyStateCreateInfo input_asm_info = {
@@ -634,7 +652,7 @@ void create_buf(Context *ctx, VkDeviceSize size, VkBufferUsageFlags use,
                                    0,
                                    0,
                                    size,
-                                   VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                                   use,
                                    VK_SHARING_MODE_EXCLUSIVE,
                                    0,
                                    0};
@@ -1289,6 +1307,42 @@ void copy_texture(Context *ctx, uint32_t *tex, uint32_t tex_size,
     vkUpdateDescriptorSets(ctx->dev, 1, &write_desc, 0, 0);
 }
 
+void copy_vertices(Context *ctx, float *vert, uint32_t vert_size) {
+    create_buf(ctx, vert_size, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+               VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                   VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+               &ctx->staging_vert_buf, &ctx->staging_vert_mem);
+
+    void *data;
+    vkMapMemory(ctx->dev, ctx->staging_vert_mem, 0, vert_size, 0, &data);
+    memcpy(data, vert, vert_size);
+    vkUnmapMemory(ctx->dev, ctx->staging_vert_mem);
+
+    create_buf(
+        ctx, vert_size,
+        VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+        VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, &ctx->vert_buf, &ctx->vert_mem);
+
+    VkCommandBuffer cmd_buf;
+    begin_cmds_once(ctx, &cmd_buf);
+
+    VkBufferCopy copies[] = {{0, 0, vert_size}};
+    uint32_t copies_cnt = sizeof(copies) / sizeof(*copies);
+
+    vkCmdCopyBuffer(cmd_buf, ctx->staging_vert_buf, ctx->vert_buf, copies_cnt,
+                    copies);
+
+    end_cmds_once(ctx, cmd_buf);
+
+    vkDestroyBuffer(ctx->dev, ctx->staging_vert_buf, 0);
+    vkFreeMemory(ctx->dev, ctx->staging_vert_mem, 0);
+
+    push_destroyer(ctx, DestroyBuffer, Handle, ctx->vert_buf);
+    push_destroyer(ctx, FreeMemory, Handle, ctx->vert_mem);
+
+    ctx->vert_cnt = (vert_size / sizeof(float)) / 2;
+}
+
 void draw(Arena *arena, Context *ctx) {
     [[maybe_unused]] VkBool32 vk_ret;
 
@@ -1326,7 +1380,7 @@ void draw(Arena *arena, Context *ctx) {
 
     // Simple variation of the background color
     VkClearValue clear_vals[] = {
-        {{{0., 1., (float)(ctx->frame_cnt % 100) / 100, 1.}}}};
+        {{{0., 0., (((float)(ctx->frame_cnt % 100) / 100) / 2) + 0.5, 1.}}}};
     uint32_t clear_vals_cnt = sizeof(clear_vals) / sizeof(*clear_vals);
 
     VkRenderPassBeginInfo rendpass_begin_info = {
@@ -1350,8 +1404,13 @@ void draw(Arena *arena, Context *ctx) {
                             VK_PIPELINE_BIND_POINT_GRAPHICS, ctx->pipeline_lay,
                             0, descs_cnt, descs, 0, 0);
 
-    // TODO: Have vertices at runtime not hardcoded
-    vkCmdDraw(ctx->cmd_buf[ctx->frame_idx], 6, 1, 0, 0);
+    VkDeviceSize offsets[] = {0};
+    VkBuffer vert_bufs[] = {ctx->vert_buf};
+    uint32_t vert_bufs_cnt = sizeof(vert_bufs) / sizeof(*vert_bufs);
+    vkCmdBindVertexBuffers(ctx->cmd_buf[ctx->frame_idx], 0, vert_bufs_cnt,
+                           vert_bufs, offsets);
+
+    vkCmdDraw(ctx->cmd_buf[ctx->frame_idx], ctx->vert_cnt, 1, 0, 0);
 
     vkCmdEndRenderPass(ctx->cmd_buf[ctx->frame_idx]);
     vkEndCommandBuffer(ctx->cmd_buf[ctx->frame_idx]);
@@ -1431,13 +1490,20 @@ int main(void) {
     uint32_t *texture = alloc_arr(&arena, 8 * lett, uint32_t);
     VkDeviceSize texture_size = 8 * lett * sizeof(*texture);
 
-    for (size_t i = lett * 33, j = 0; j < lett; i++, j++) {
+    for (size_t i = lett * 49, j = 0; j < lett; i++, j++) {
         for (size_t k = 0; k < 8; k++) {
             texture[k + j * 8] =
                 (font.data[i] & (1 << (8 - k))) ? 0xFF000000 : 0x00000000;
         }
     }
     copy_texture(&ctx, texture, texture_size, (VkExtent3D){8, lett, 1});
+
+    float verts[] = {
+        -0.5, -0.5, 0, 0, 0.5, -0.5, 1, 0, 0.5,  0.5, 1, 1,
+        -0.5, -0.5, 0, 0, 0.5, 0.5,  1, 1, -0.5, 0.5, 0, 1,
+    };
+    VkDeviceSize verts_size = sizeof(verts);
+    copy_vertices(&ctx, verts, verts_size);
 
     while (!glfwWindowShouldClose(ctx.window)) {
         draw(arena, &ctx);

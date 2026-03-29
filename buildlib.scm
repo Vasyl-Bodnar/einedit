@@ -273,7 +273,7 @@
               (let ((result (status:exit-val (apply system* (append (list command-mv "-t" build-dir) outputs)))))
                 (unless (= result 0)
                   (warng config "Could not move outputs to build. Please check arguments and permissions")))))
-          (warng config "External Command Did Not Succeed " name "\nReturned " result)))))
+          (warng config "External Command Did Not Succeed: " (basename name) "\nReturned " (number->string result))))))
 
 (define (hash-c-file config source-file)
   (let ((c-compiler (config-c-compiler config))
