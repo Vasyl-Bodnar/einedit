@@ -22,13 +22,14 @@
 (let ((config
        (if windows?
            (configure #:c-compiler "x86_64-w64-mingw32-gcc" #:exe-name "einedit"
-                      #:link '("glfw3" "vulkan-1" "gdi32" "user32")
+                      #:link '((static "glfw3") "vulkan-1" (static "gdi32") (static "user32"))
                       #:link-path (list (in-vicinity glfw-win-path "lib-mingw-w64") (in-vicinity vulkan-win-path "Lib32"))
                       #:include (list (in-vicinity glfw-win-path "include") (in-vicinity vulkan-win-path "Include"))
-                      #:optimization (if release? "-O3" "-O0") #:debug (if release? "" "-g") #:derive (if release? '(NDEBUG) '()))
+                      #:optimization (if release? "-O3" "-O0") #:debug (if release? "" "-g") #:strip release? #:derive (if release? '(NDEBUG) '())
+                      #:extra-args (if release? '("-Wl,-subsystem,windows") '()))
            (configure #:exe-name "einedit"
                       #:link '("glfw" "vulkan")
-                      #:optimization (if release? "-O3" "-O0") #:debug (if release? "" "-g") #:derive (if release? '(NDEBUG) '())))))
+                      #:optimization (if release? "-O3" "-O0") #:debug (if release? "" "-g") #:strip release? #:derive (if release? '(NDEBUG) '())))))
 
   (run-external config shader? #:name "glslc" #:args '("src/shader/basic.vert" "-o" "vert.spv") #:outputs '("vert.spv"))
   (run-external config shader? #:name "glslc" #:args '("src/shader/basic.frag" "-o" "frag.spv") #:outputs '("frag.spv"))

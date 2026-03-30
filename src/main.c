@@ -6,6 +6,7 @@
 #include <GLFW/glfw3.h>
 #include <assert.h>
 #include <stdalign.h>
+#include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -14,7 +15,7 @@
 #include <sys/stat.h>
 
 #define DESC_LAY_CNT 1
-#define MAX_FRAME_IDX 2
+#define MAX_FRAME_NUM 2
 
 PFN_vkCreateDebugUtilsMessengerEXT vkCreateDebugUtilsMessenger;
 PFN_vkDestroyDebugUtilsMessengerEXT vkDestroyDebugUtilsMessenger;
@@ -31,6 +32,7 @@ enum destroy_type {
     DestroyImage,
     DestroyBuffer,
     FreeMemory,
+    UnmapMemory,
     DestroySampler,
     DestroyDescriptorPool,
     DestroyDescriptorSetLayout,
@@ -60,6 +62,7 @@ typedef struct Destroyer {
 
 // Current Vulkan code is based mostly on:
 // rafael-abreu-english.blogspot.com - Vulkan series
+// Might want to align the 32bit numbers together
 typedef struct Context {
     GLFWwindow *window;
 
@@ -67,10 +70,11 @@ typedef struct Context {
     VkSurfaceKHR surf;
     VkPhysicalDevice phy_dev;
     VkDevice dev;
+
     uint32_t qf_idx;
     VkQueue queue;
-
     VkSwapchainKHR swapchain;
+    VkSwapchainKHR old_swapchain;
     uint32_t img_cnt;
     VkImage *img;
     VkImageView *img_view;
@@ -79,7 +83,7 @@ typedef struct Context {
     VkRenderPass rendpass;
     VkFramebuffer *fb;
     VkCommandPool cmd_pool;
-    VkCommandBuffer cmd_buf[MAX_FRAME_IDX];
+    VkCommandBuffer cmd_buf[MAX_FRAME_NUM];
     VkPipelineLayout pipeline_lay;
     VkPipeline pipeline;
 
@@ -92,6 +96,10 @@ typedef struct Context {
     VkImageView tex_img_view;
     VkSampler tex_sampler;
 
+    float *proj_mat;
+    VkBuffer uni_buf;
+    VkDeviceMemory uni_mem;
+
     VkBuffer staging_vert_buf;
     VkDeviceMemory staging_vert_mem;
     VkBuffer vert_buf;
@@ -100,11 +108,12 @@ typedef struct Context {
 
     uint32_t frame_idx;
     uint64_t frame_cnt;
-    VkFence fence[MAX_FRAME_IDX];
-    VkSemaphore img_avail[MAX_FRAME_IDX];
+    VkFence fence[MAX_FRAME_NUM];
+    VkSemaphore img_avail[MAX_FRAME_NUM];
     VkSemaphore *rend_done;
-    VkDebugUtilsMessengerEXT dbg_msger;
 
+    bool resize_flag;
+    VkDebugUtilsMessengerEXT dbg_msger;
     Destroyer *destroyer;
 } Context;
 
@@ -291,6 +300,9 @@ void pop_destroyer(Context *ctx) {
     case FreeMemory:
         vkFreeMemory(ctx->dev, obj, 0);
         break;
+    case UnmapMemory:
+        vkUnmapMemory(ctx->dev, obj);
+        break;
     case DestroySampler:
         vkDestroySampler(ctx->dev, obj, 0);
         break;
@@ -343,7 +355,7 @@ size_t font_type_to_bytes(enum font_type font_type) {
 
 FontLUT load_font(Arena **arena, const char *path) {
     FontLUT font;
-    size_t res;
+    [[maybe_unused]] size_t res;
 
     FILE *file = fopen(path, "rb");
     assert(file && "Could not open a Font File");
@@ -782,11 +794,8 @@ void create_swapchain(Arena **arena, Context *ctx) {
 
 void update_swapchain(Context *ctx) {
     [[maybe_unused]] VkBool32 vk_ret;
-    for (uint32_t i = 0; i < ctx->img_cnt; i++) {
-        vkDestroyFramebuffer(ctx->dev, ctx->fb[i], 0);
-        vkDestroyImageView(ctx->dev, ctx->img_view[i], 0);
-    }
-    vkDestroySwapchainKHR(ctx->dev, ctx->swapchain, 0);
+    vkDeviceWaitIdle(ctx->dev);
+    ctx->old_swapchain = ctx->swapchain;
 
     VkSurfaceCapabilitiesKHR surf_caps;
     vk_ret = vkGetPhysicalDeviceSurfaceCapabilitiesKHR(ctx->phy_dev, ctx->surf,
@@ -798,6 +807,10 @@ void update_swapchain(Context *ctx) {
     if (ctx->extent.width == -1 && ctx->extent.height == -1) {
         glfwGetFramebufferSize(ctx->window, (int *)&ctx->extent.width,
                                (int *)&ctx->extent.height);
+    }
+
+    if (ctx->extent.width == 0 && ctx->extent.height == 0) {
+        return;
     }
 
     VkSwapchainCreateInfoKHR swapchain_info = {
@@ -818,15 +831,21 @@ void update_swapchain(Context *ctx) {
         VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR,
         VK_PRESENT_MODE_MAILBOX_KHR,
         VK_TRUE,
-        0,
+        ctx->old_swapchain,
     };
 
     vk_ret =
         vkCreateSwapchainKHR(ctx->dev, &swapchain_info, 0, &ctx->swapchain);
     assert(vk_ret == VK_SUCCESS && "Could not update a Swapchain");
+
     vk_ret = vkGetSwapchainImagesKHR(ctx->dev, ctx->swapchain, &ctx->img_cnt,
                                      ctx->img);
     assert(vk_ret == VK_SUCCESS && "Could not get updated valid Images");
+
+    for (uint32_t i = 0; i < ctx->img_cnt; i++) {
+        vkDestroyFramebuffer(ctx->dev, ctx->fb[i], 0);
+        vkDestroyImageView(ctx->dev, ctx->img_view[i], 0);
+    }
 
     for (uint32_t i = 0; i < ctx->img_cnt; i++) {
         vk_ret = create_img_view(ctx, ctx->img_view + i, ctx->img[i],
@@ -850,13 +869,17 @@ void update_swapchain(Context *ctx) {
         vk_ret = vkCreateFramebuffer(ctx->dev, &fb_info, 0, ctx->fb + i);
         assert(vk_ret == VK_SUCCESS && "Could not update a Framebuffer");
     }
+
+    vkDestroySwapchainKHR(ctx->dev, ctx->old_swapchain, 0);
 }
 
 void create_desc(Context *ctx) {
     [[maybe_unused]] VkBool32 vk_ret = 0;
     VkDescriptorSetLayoutBinding desc_lay_binds[] = {
         {0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1,
-         VK_SHADER_STAGE_FRAGMENT_BIT, 0}};
+         VK_SHADER_STAGE_FRAGMENT_BIT, 0},
+        {1, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_VERTEX_BIT,
+         0}};
     uint32_t desc_lay_binds_cnt =
         sizeof(desc_lay_binds) / sizeof(*desc_lay_binds);
 
@@ -871,7 +894,8 @@ void create_desc(Context *ctx) {
                    ctx->desc_lay);
 
     VkDescriptorPoolSize desc_pool_sizes[] = {
-        {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1}};
+        {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1},
+        {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1}};
     uint32_t desc_pool_sizes_cnt =
         sizeof(desc_pool_sizes) / sizeof(*desc_pool_sizes);
 
@@ -941,17 +965,23 @@ void init_ctx(Arena **arena, Context *ctx) {
     VkLayerProperties *props = alloc_arr(arena, prop_cnt, typeof(*props));
     vkEnumerateInstanceLayerProperties(&prop_cnt, props);
 
+#ifdef NDEBUG
+    const char *layers[] = {};
+#else
     const char *layers[] = {"VK_LAYER_KHRONOS_validation"};
+#endif
     uint32_t layers_cnt = sizeof(layers) / sizeof(*layers);
 
     [[maybe_unused]] int prop_flag = 0;
-    for (uint32_t i = 0; i < prop_cnt; i++) {
-        if (!memcmp(layers[0], props[i].layerName, strlen(layers[0]))) {
-            prop_flag = 1;
-            break;
+    for (uint32_t i = 0; i < layers_cnt; i++) {
+        for (uint32_t j = 0; j < prop_cnt; j++) {
+            if (!memcmp(layers[i], props[j].layerName, strlen(layers[i]))) {
+                prop_flag += 1;
+                break;
+            }
         }
     }
-    assert(prop_flag && "Could not find the validation layer");
+    assert(prop_flag == layers_cnt && "Could not find the validation layer");
 
     uint32_t exts_cnt = 0;
     const char **exts = glfwGetRequiredInstanceExtensions(&exts_cnt);
@@ -1106,7 +1136,7 @@ void init_ctx(Arena **arena, Context *ctx) {
     VkSemaphoreCreateInfo sem_info = {VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO,
                                       0, 0};
 
-    for (size_t i = 0; i < MAX_FRAME_IDX; i++) {
+    for (size_t i = 0; i < MAX_FRAME_NUM; i++) {
         vk_ret = vkCreateSemaphore(ctx->dev, &sem_info, 0, ctx->img_avail + i);
         assert(vk_ret == VK_SUCCESS && "Could not create Semaphores");
         push_destroyer(ctx, DestroySemaphore, Handle, ctx->img_avail[i]);
@@ -1151,18 +1181,20 @@ void init_ctx(Arena **arena, Context *ctx) {
         VK_FENCE_CREATE_SIGNALED_BIT,
     };
 
-    for (size_t i = 0; i < MAX_FRAME_IDX; i++) {
+    for (size_t i = 0; i < MAX_FRAME_NUM; i++) {
         vk_ret = vkCreateFence(ctx->dev, &fence_info, 0, ctx->fence + i);
         assert(vk_ret == VK_SUCCESS && "Could not create a Fence");
         push_destroyer(ctx, DestroyFence, Handle, ctx->fence[i]);
     }
 
+    // Handle some defaults
     ctx->frame_cnt = 0;
     ctx->frame_idx = 0;
+    ctx->resize_flag = 0;
 }
 
-void copy_texture(Context *ctx, uint32_t *tex, uint32_t tex_size,
-                  VkExtent3D extent) {
+void setup_texture(Context *ctx, uint32_t *tex, uint32_t tex_size,
+                   VkExtent3D extent) {
     [[maybe_unused]] VkBool32 vk_ret;
     VkBuffer staging_buf;
     VkDeviceMemory staging_buf_mem;
@@ -1172,7 +1204,7 @@ void copy_texture(Context *ctx, uint32_t *tex, uint32_t tex_size,
                    VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
                &staging_buf, &staging_buf_mem);
 
-    void *data = 0;
+    void *data;
     vk_ret = vkMapMemory(ctx->dev, staging_buf_mem, 0, tex_size, 0, &data);
     assert(vk_ret == VK_SUCCESS && "Could not map Staging Buffer Memory");
     memcpy(data, tex, tex_size);
@@ -1288,33 +1320,19 @@ void copy_texture(Context *ctx, uint32_t *tex, uint32_t tex_size,
     vk_ret = vkCreateSampler(ctx->dev, &sampler_info, 0, &ctx->tex_sampler);
     assert(vk_ret == VK_SUCCESS && "Could not create the Sampler");
     push_destroyer(ctx, DestroySampler, Handle, ctx->tex_sampler);
-
-    VkDescriptorImageInfo desc_info = {
-        ctx->tex_sampler, ctx->tex_img_view,
-        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
-    VkWriteDescriptorSet write_desc = {
-        VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-        0,
-        ctx->desc,
-        0,
-        0,
-        1,
-        VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-        &desc_info,
-        0,
-        0};
-
-    vkUpdateDescriptorSets(ctx->dev, 1, &write_desc, 0, 0);
 }
 
-void copy_vertices(Context *ctx, float *vert, uint32_t vert_size) {
+void setup_vertices(Context *ctx, float *vert, uint32_t vert_size) {
+    [[maybe_unused]] VkBool32 vk_ret = 0;
     create_buf(ctx, vert_size, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
                    VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
                &ctx->staging_vert_buf, &ctx->staging_vert_mem);
 
     void *data;
-    vkMapMemory(ctx->dev, ctx->staging_vert_mem, 0, vert_size, 0, &data);
+    vk_ret =
+        vkMapMemory(ctx->dev, ctx->staging_vert_mem, 0, vert_size, 0, &data);
+    assert(vk_ret == VK_SUCCESS && "Could not map Memory");
     memcpy(data, vert, vert_size);
     vkUnmapMemory(ctx->dev, ctx->staging_vert_mem);
 
@@ -1324,7 +1342,8 @@ void copy_vertices(Context *ctx, float *vert, uint32_t vert_size) {
         VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, &ctx->vert_buf, &ctx->vert_mem);
 
     VkCommandBuffer cmd_buf;
-    begin_cmds_once(ctx, &cmd_buf);
+    vk_ret = begin_cmds_once(ctx, &cmd_buf);
+    assert(vk_ret == VK_SUCCESS && "Could not begin Commands");
 
     VkBufferCopy copies[] = {{0, 0, vert_size}};
     uint32_t copies_cnt = sizeof(copies) / sizeof(*copies);
@@ -1343,6 +1362,40 @@ void copy_vertices(Context *ctx, float *vert, uint32_t vert_size) {
     ctx->vert_cnt = (vert_size / sizeof(float)) / 2;
 }
 
+void setup_proj(Context *ctx, float *proj, uint32_t proj_size) {
+    [[maybe_unused]] VkBool32 vk_ret = 0;
+    create_buf(ctx, proj_size, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+               VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                   VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+               &ctx->uni_buf, &ctx->uni_mem);
+
+    vk_ret = vkMapMemory(ctx->dev, ctx->uni_mem, 0, proj_size, 0,
+                         (void *)&ctx->proj_mat);
+    assert(vk_ret == VK_SUCCESS && "Could not map Memory");
+    memcpy(ctx->proj_mat, proj, proj_size);
+
+    push_destroyer(ctx, DestroyBuffer, Handle, ctx->uni_buf);
+    push_destroyer(ctx, FreeMemory, Handle, ctx->uni_mem);
+    push_destroyer(ctx, UnmapMemory, Handle, ctx->uni_mem);
+}
+
+void update_desc(Context *ctx, uint32_t uni_size) {
+    VkDescriptorImageInfo desc_img_info = {
+        ctx->tex_sampler, ctx->tex_img_view,
+        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+
+    VkDescriptorBufferInfo desc_uni_info = {ctx->uni_buf, 0, uni_size};
+
+    VkWriteDescriptorSet write_descs[] = {
+        {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, 0, ctx->desc, 0, 0, 1,
+         VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &desc_img_info, 0, 0},
+        {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, 0, ctx->desc, 1, 0, 1,
+         VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 0, &desc_uni_info, 0}};
+    uint32_t write_descs_cnt = sizeof(write_descs) / sizeof(*write_descs);
+
+    vkUpdateDescriptorSets(ctx->dev, write_descs_cnt, write_descs, 0, 0);
+}
+
 void draw(Arena *arena, Context *ctx) {
     [[maybe_unused]] VkBool32 vk_ret;
 
@@ -1354,18 +1407,17 @@ void draw(Arena *arena, Context *ctx) {
                                    ctx->img_avail[ctx->frame_idx],
                                    VK_NULL_HANDLE, &img_idx);
 
-    vkResetFences(ctx->dev, 1, ctx->fence + ctx->frame_idx);
-
     switch (vk_ret) {
     case VK_ERROR_OUT_OF_DATE_KHR:
-        vkDeviceWaitIdle(ctx->dev);
-        update_swapchain(ctx);
+        ctx->resize_flag = 1;
         return;
     default:
         assert(vk_ret == VK_SUCCESS && "Could not acquire next Image");
         assert(img_idx != UINT32_MAX &&
                "Could not acquire proper next Image Index");
     }
+
+    vkResetFences(ctx->dev, 1, ctx->fence + ctx->frame_idx);
 
     vk_ret = vkResetCommandBuffer(ctx->cmd_buf[ctx->frame_idx], 0);
     assert(vk_ret == VK_SUCCESS && "Could not reset Command Buffer");
@@ -1458,15 +1510,67 @@ void draw(Arena *arena, Context *ctx) {
     vk_ret = vkQueuePresentKHR(ctx->queue, &present_info);
     switch (vk_ret) {
     case VK_ERROR_OUT_OF_DATE_KHR:
-        vkDeviceWaitIdle(ctx->dev);
-        update_swapchain(ctx);
+        ctx->resize_flag = 1;
         break;
     default:
         assert(vk_ret == VK_SUCCESS && "Could not Present in Queue");
     }
 
     ctx->frame_cnt += 1;
-    ctx->frame_idx = (ctx->frame_idx + 1) % MAX_FRAME_IDX;
+    ctx->frame_idx = (ctx->frame_idx + 1) % MAX_FRAME_NUM;
+}
+
+void resize(Context *ctx) {
+    update_swapchain(ctx);
+    ctx->proj_mat[0] = 2.f / (float)ctx->extent.width;
+    ctx->proj_mat[5] = 2.f / (float)ctx->extent.height;
+    ctx->resize_flag = 0;
+}
+
+void setup_bufs(Arena **arena, Context *ctx) {
+    FontLUT font = load_font(arena, "unscii-8.bin");
+    size_t lett = font_type_to_bytes(font.type);
+
+    uint32_t *texture = alloc_arr(arena, 8 * lett, uint32_t);
+    VkDeviceSize texture_size = 8 * lett * sizeof(*texture);
+
+    for (size_t i = lett * 49, j = 0; j < lett; i++, j++) {
+        for (size_t k = 0; k < 8; k++) {
+            texture[k + j * 8] =
+                (font.data[i] & (1 << (8 - k))) ? 0xFF000000 : 0x00000000;
+        }
+    }
+    setup_texture(ctx, texture, texture_size, (VkExtent3D){8, lett, 1});
+
+    float proj_mat[] = {
+        2.f / (float)ctx->extent.width,
+        0,
+        0,
+        -1,
+        0,
+        2.f / (float)ctx->extent.height,
+        0,
+        -1,
+        0,
+        0,
+        1,
+        0,
+        0,
+        0,
+        0,
+        1,
+    };
+    VkDeviceSize proj_size = sizeof(proj_mat);
+    setup_proj(ctx, proj_mat, proj_size);
+
+    update_desc(ctx, proj_size);
+
+    float verts[] = {
+        0, 0, 0, 0, 100, 0,   1, 0, 100, 100, 1, 1,
+        0, 0, 0, 0, 100, 100, 1, 1, 0,   100, 0, 1,
+    };
+    VkDeviceSize verts_size = sizeof(verts);
+    setup_vertices(ctx, verts, verts_size);
 }
 
 int main(void) {
@@ -1482,31 +1586,18 @@ int main(void) {
 
     // We assume we will not have more than 1000 Vulkan objects
     alloc_destroyer(&arena, &ctx, 1000);
+
     init_ctx(&arena, &ctx);
 
-    FontLUT font = load_font(&arena, "unscii-8.bin");
-    size_t lett = font_type_to_bytes(font.type);
-
-    uint32_t *texture = alloc_arr(&arena, 8 * lett, uint32_t);
-    VkDeviceSize texture_size = 8 * lett * sizeof(*texture);
-
-    for (size_t i = lett * 49, j = 0; j < lett; i++, j++) {
-        for (size_t k = 0; k < 8; k++) {
-            texture[k + j * 8] =
-                (font.data[i] & (1 << (8 - k))) ? 0xFF000000 : 0x00000000;
-        }
-    }
-    copy_texture(&ctx, texture, texture_size, (VkExtent3D){8, lett, 1});
-
-    float verts[] = {
-        -0.5, -0.5, 0, 0, 0.5, -0.5, 1, 0, 0.5,  0.5, 1, 1,
-        -0.5, -0.5, 0, 0, 0.5, 0.5,  1, 1, -0.5, 0.5, 0, 1,
-    };
-    VkDeviceSize verts_size = sizeof(verts);
-    copy_vertices(&ctx, verts, verts_size);
+    setup_bufs(&arena, &ctx);
 
     while (!glfwWindowShouldClose(ctx.window)) {
         draw(arena, &ctx);
+
+        if (ctx.resize_flag) {
+            resize(&ctx);
+        }
+
         glfwWaitEvents();
     }
 
@@ -1514,7 +1605,10 @@ int main(void) {
     vkDeviceWaitIdle(ctx.dev);
 
     empty_destroyer(&ctx);
+
     glfwTerminate();
+
     delete_arena(arena);
+
     return 0;
 }

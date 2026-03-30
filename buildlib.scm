@@ -15,7 +15,7 @@
   #:export (configure run-external compile-c install clean print-config config-error fail warng info))
 
 (define-record-type <c-compiler>
-  (make-c-compiler name archiver args incl-args lib-args lib-type hash)
+  (make-c-compiler name archiver args incl-args lib-args lib-type extra-args hash)
   c-compiler?
   (name c-compiler-name)
   (archiver c-compiler-archiver)
@@ -23,6 +23,7 @@
   (incl-args c-compiler-incl-args)
   (lib-args c-compiler-lib-args)
   (lib-type c-compiler-lib-type)
+  (extra-args c-compiler-extra-args)
   (hash c-compiler-hash))
 
 (define-record-type <path>
@@ -130,7 +131,7 @@
                             (char=? #\space (string-ref hash i)))
                         i))))))
 
-(define (hash-compiler-info hash-commands c-compiler c-archiver c-args c-incl-args c-lib-args)
+(define (hash-compiler-info hash-commands c-compiler c-archiver c-args c-incl-args c-lib-args c-extra-args)
   (if (null? hash-commands)
       #f
       (let* ((port (open-pipe* OPEN_READ c-compiler "--version"))
@@ -139,7 +140,8 @@
         (let* ((port (open-input-string
                       (string-append str c-archiver (apply string-append (append c-args
                                                                                  c-incl-args
-                                                                                 c-lib-args)))))
+                                                                                 c-lib-args
+                                                                                 c-extra-args)))))
                (hash (hash-port hash-commands port)))
           (close-input-port port)
           hash))))
@@ -196,19 +198,20 @@
                     (root ".") (src-dir "src") (lib-src-dir src-dir) (build-dir "build") (obj-dir "obj")
                     (exe-name #f) (lib-name #f) (lib-type 'none)
                     (sudo #t) (verbosity 3) (cache-enable #t) (cache-keep-configs 3)
-                    (optimization "-O0") (debug "-g") (wall "-Wall") (derive '())
-                    (include-name #f) (include '()) (link '()) (link-path '()))
+                    (optimization "-O0") (debug "-g") (wall "-Wall") (strip #f) (derive '())
+                    (include-name #f) (include '()) (link '()) (link-path '()) (extra-args '()))
   (let* ((command (make-real-command '("b2sum" "sha512sum" "sha256sum" "sha1sum" "md5sum")
                                      '("doas" "sudo") '("rmdir") '("rm") '("cp") '("mv")))
-         (extra-args (append (filter (lambda (s) (not (string= s ""))) (list optimization debug wall))
-                             (map (lambda (der)
-                                    (string-append "-D" (if (symbol? der)
-                                                            (symbol->string der) der)))
-                                  derive)))
+         (args (append (filter (lambda (s) (not (string= s ""))) (list optimization debug wall))
+                       (map (lambda (der)
+                              (string-append "-D" (if (symbol? der)
+                                                      (symbol->string der) der)))
+                            derive)))
          (incl-args (map (lambda (inc) (string-append "-I" inc)) include))
          (lib-args (get-lib-args link link-path))
-         (c-compiler (make-c-compiler c-compiler c-archiver extra-args incl-args lib-args lib-type
-                                      (hash-compiler-info (command-hash command) c-compiler c-archiver extra-args incl-args lib-args)))
+         (extra-args (if strip (cons "-s" extra-args) extra-args))
+         (c-compiler (make-c-compiler c-compiler c-archiver args incl-args lib-args lib-type extra-args
+                                      (hash-compiler-info (command-hash command) c-compiler c-archiver args incl-args lib-args extra-args)))
          (path (make-full-path root src-dir lib-src-dir build-dir obj-dir (c-compiler-hash c-compiler) include-name lib-name exe-name))
          (cache (make-cache cache-enable cache-keep-configs))
          (config (make-config c-compiler path cache command (if (> verbosity 3) 3 verbosity) '())))
@@ -369,7 +372,8 @@
                                          (cons (c-compiler-name (config-c-compiler config))
                                                (append objs
                                                        (list "-o" (path-executable (config-paths config)))
-                                                       (c-compiler-lib-args (config-c-compiler config))))))))
+                                                       (c-compiler-lib-args (config-c-compiler config))
+                                                       (c-compiler-extra-args (config-c-compiler config))))))))
 
 (define (link-lib config objs)
   (let ((c-compiler (config-c-compiler config))
