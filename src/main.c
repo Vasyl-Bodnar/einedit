@@ -100,11 +100,16 @@ typedef struct Context {
     VkBuffer uni_buf;
     VkDeviceMemory uni_mem;
 
-    VkBuffer staging_vert_buf;
-    VkDeviceMemory staging_vert_mem;
+    VkBuffer staging_buf;
+    VkDeviceMemory staging_mem;
+
     VkBuffer vert_buf;
     VkDeviceMemory vert_mem;
     uint32_t vert_cnt;
+
+    VkBuffer idx_buf;
+    VkDeviceMemory idx_mem;
+    uint32_t idx_cnt;
 
     uint32_t frame_idx;
     uint64_t frame_cnt;
@@ -1327,14 +1332,13 @@ void setup_vertices(Context *ctx, float *vert, uint32_t vert_size) {
     create_buf(ctx, vert_size, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
                    VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-               &ctx->staging_vert_buf, &ctx->staging_vert_mem);
+               &ctx->staging_buf, &ctx->staging_mem);
 
     void *data;
-    vk_ret =
-        vkMapMemory(ctx->dev, ctx->staging_vert_mem, 0, vert_size, 0, &data);
+    vk_ret = vkMapMemory(ctx->dev, ctx->staging_mem, 0, vert_size, 0, &data);
     assert(vk_ret == VK_SUCCESS && "Could not map Memory");
     memcpy(data, vert, vert_size);
-    vkUnmapMemory(ctx->dev, ctx->staging_vert_mem);
+    vkUnmapMemory(ctx->dev, ctx->staging_mem);
 
     create_buf(
         ctx, vert_size,
@@ -1348,18 +1352,57 @@ void setup_vertices(Context *ctx, float *vert, uint32_t vert_size) {
     VkBufferCopy copies[] = {{0, 0, vert_size}};
     uint32_t copies_cnt = sizeof(copies) / sizeof(*copies);
 
-    vkCmdCopyBuffer(cmd_buf, ctx->staging_vert_buf, ctx->vert_buf, copies_cnt,
+    vkCmdCopyBuffer(cmd_buf, ctx->staging_buf, ctx->vert_buf, copies_cnt,
                     copies);
 
     end_cmds_once(ctx, cmd_buf);
 
-    vkDestroyBuffer(ctx->dev, ctx->staging_vert_buf, 0);
-    vkFreeMemory(ctx->dev, ctx->staging_vert_mem, 0);
+    vkDestroyBuffer(ctx->dev, ctx->staging_buf, 0);
+    vkFreeMemory(ctx->dev, ctx->staging_mem, 0);
 
     push_destroyer(ctx, DestroyBuffer, Handle, ctx->vert_buf);
     push_destroyer(ctx, FreeMemory, Handle, ctx->vert_mem);
 
     ctx->vert_cnt = (vert_size / sizeof(float)) / 2;
+}
+
+void setup_indices(Context *ctx, uint32_t *idx, uint32_t idx_size) {
+    [[maybe_unused]] VkBool32 vk_ret = 0;
+    create_buf(ctx, idx_size, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+               VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                   VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+               &ctx->staging_buf, &ctx->staging_mem);
+
+    void *data;
+    vk_ret = vkMapMemory(ctx->dev, ctx->staging_mem, 0, idx_size, 0, &data);
+    assert(vk_ret == VK_SUCCESS && "Could not map Memory");
+    memcpy(data, idx, idx_size);
+    vkUnmapMemory(ctx->dev, ctx->staging_mem);
+
+    create_buf(
+        ctx, idx_size,
+        VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+        VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, &ctx->idx_buf, &ctx->idx_mem);
+
+    VkCommandBuffer cmd_buf;
+    vk_ret = begin_cmds_once(ctx, &cmd_buf);
+    assert(vk_ret == VK_SUCCESS && "Could not begin Commands");
+
+    VkBufferCopy copies[] = {{0, 0, idx_size}};
+    uint32_t copies_cnt = sizeof(copies) / sizeof(*copies);
+
+    vkCmdCopyBuffer(cmd_buf, ctx->staging_buf, ctx->idx_buf, copies_cnt,
+                    copies);
+
+    end_cmds_once(ctx, cmd_buf);
+
+    vkDestroyBuffer(ctx->dev, ctx->staging_buf, 0);
+    vkFreeMemory(ctx->dev, ctx->staging_mem, 0);
+
+    push_destroyer(ctx, DestroyBuffer, Handle, ctx->idx_buf);
+    push_destroyer(ctx, FreeMemory, Handle, ctx->idx_mem);
+
+    ctx->idx_cnt = idx_size / sizeof(uint32_t);
 }
 
 void setup_proj(Context *ctx, float *proj, uint32_t proj_size) {
@@ -1462,7 +1505,10 @@ void draw(Arena *arena, Context *ctx) {
     vkCmdBindVertexBuffers(ctx->cmd_buf[ctx->frame_idx], 0, vert_bufs_cnt,
                            vert_bufs, offsets);
 
-    vkCmdDraw(ctx->cmd_buf[ctx->frame_idx], ctx->vert_cnt, 1, 0, 0);
+    vkCmdBindIndexBuffer(ctx->cmd_buf[ctx->frame_idx], ctx->idx_buf, 0,
+                         VK_INDEX_TYPE_UINT32);
+
+    vkCmdDrawIndexed(ctx->cmd_buf[ctx->frame_idx], ctx->idx_cnt, 1, 0, 0, 0);
 
     vkCmdEndRenderPass(ctx->cmd_buf[ctx->frame_idx]);
     vkEndCommandBuffer(ctx->cmd_buf[ctx->frame_idx]);
@@ -1531,16 +1577,16 @@ void setup_bufs(Arena **arena, Context *ctx) {
     FontLUT font = load_font(arena, "unscii-8.bin");
     size_t lett = font_type_to_bytes(font.type);
 
-    uint32_t *texture = alloc_arr(arena, 8 * lett, uint32_t);
-    VkDeviceSize texture_size = 8 * lett * sizeof(*texture);
+    uint32_t *texture = alloc_arr(arena, 8 * lett * 2, uint32_t);
+    VkDeviceSize texture_size = 8 * lett * 2 * sizeof(*texture);
 
-    for (size_t i = lett * 49, j = 0; j < lett; i++, j++) {
+    for (size_t i = lett * 49, j = 0; j < lett * 2; i++, j++) {
         for (size_t k = 0; k < 8; k++) {
             texture[k + j * 8] =
                 (font.data[i] & (1 << (8 - k))) ? 0xFF000000 : 0x00000000;
         }
     }
-    setup_texture(ctx, texture, texture_size, (VkExtent3D){8, lett, 1});
+    setup_texture(ctx, texture, texture_size, (VkExtent3D){8, lett * 2, 1});
 
     float proj_mat[] = {
         2.f / (float)ctx->extent.width,
@@ -1566,11 +1612,14 @@ void setup_bufs(Arena **arena, Context *ctx) {
     update_desc(ctx, proj_size);
 
     float verts[] = {
-        0, 0, 0, 0, 100, 0,   1, 0, 100, 100, 1, 1,
-        0, 0, 0, 0, 100, 100, 1, 1, 0,   100, 0, 1,
+        0, 0, 0, 0, 50, 0, 1, 0, 0, 100, 0, 1, 50, 100, 1, 1,
     };
     VkDeviceSize verts_size = sizeof(verts);
     setup_vertices(ctx, verts, verts_size);
+
+    uint32_t indices[] = {0, 1, 3, 0, 3, 2};
+    VkDeviceSize indices_size = sizeof(indices);
+    setup_indices(ctx, indices, indices_size);
 }
 
 int main(void) {
