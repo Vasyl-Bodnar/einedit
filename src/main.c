@@ -38,7 +38,6 @@ enum destroy_type {
     DestroyDescriptorSetLayout,
     DestroyCommandPool,
     DestroySemaphore,
-    DestroyRenderPass,
     DestroyFramebuffer,
     DestroyImageView,
     DestroySwapchainKHR,
@@ -76,12 +75,10 @@ typedef struct Context {
     VkSwapchainKHR swapchain;
     VkSwapchainKHR old_swapchain;
     uint32_t img_cnt;
-    VkImage *img;
-    VkImageView *img_view;
+    VkImage *img;          // img_cnt
+    VkImageView *img_view; // img_cnt
     VkFormat img_format;
     VkExtent2D extent;
-    VkRenderPass rendpass;
-    VkFramebuffer *fb;
     VkCommandPool cmd_pool;
     VkCommandBuffer cmd_buf[MAX_FRAME_NUM];
     VkPipelineLayout pipeline_lay;
@@ -91,31 +88,21 @@ typedef struct Context {
     VkDescriptorPool desc_pool;
     VkDescriptorSet desc;
 
-    VkImage tex_img;
-    VkDeviceMemory tex_img_mem;
-    VkImageView tex_img_view;
-    VkSampler tex_sampler;
-
-    float *proj_mat;
-    VkBuffer uni_buf;
-    VkDeviceMemory uni_mem;
-
     VkBuffer staging_buf;
     VkDeviceMemory staging_mem;
 
-    VkBuffer vert_buf;
-    VkDeviceMemory vert_mem;
-    uint32_t vert_cnt;
+    VkBuffer storage_buf;
+    VkDeviceMemory storage_mem;
 
-    VkBuffer idx_buf;
-    VkDeviceMemory idx_mem;
-    uint32_t idx_cnt;
+    VkImage storage_img;
+    VkImageView storage_img_view;
+    VkDeviceMemory storage_img_mem;
 
     uint32_t frame_idx;
     uint64_t frame_cnt;
     VkFence fence[MAX_FRAME_NUM];
     VkSemaphore img_avail[MAX_FRAME_NUM];
-    VkSemaphore *rend_done;
+    VkSemaphore *rend_done; // img_cnt
 
     bool resize_flag;
     VkDebugUtilsMessengerEXT dbg_msger;
@@ -323,9 +310,6 @@ void pop_destroyer(Context *ctx) {
     case DestroySemaphore:
         vkDestroySemaphore(ctx->dev, obj, 0);
         break;
-    case DestroyRenderPass:
-        vkDestroyRenderPass(ctx->dev, obj, 0);
-        break;
     case DestroyFramebuffer:
         vkDestroyFramebuffer(ctx->dev, obj, 0);
         break;
@@ -420,134 +404,19 @@ VkShaderModule load_shader(Arena **arena, Context *ctx, const char *path) {
     return mod;
 }
 
-void create_graphics_pipeline(Arena **arena, Context *ctx) {
+void create_compute_pipeline(Arena **arena, Context *ctx) {
     [[maybe_unused]] VkBool32 ret = 0;
-    VkShaderModule vert_shader = load_shader(arena, ctx, "vert.spv");
-    VkShaderModule frag_shader = load_shader(arena, ctx, "frag.spv");
+    VkShaderModule compute_shader = load_shader(arena, ctx, "comp.spv");
 
-    VkPipelineShaderStageCreateInfo shader_info[] = {
-        {
-            VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
-            0,
-            0,
-            VK_SHADER_STAGE_VERTEX_BIT,
-            vert_shader,
-            "main",
-            0,
-        },
-        {
-            VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
-            0,
-            0,
-            VK_SHADER_STAGE_FRAGMENT_BIT,
-            frag_shader,
-            "main",
-            0,
-        }};
-    uint32_t shader_info_cnt = sizeof(shader_info) / sizeof(*shader_info);
-
-    uint32_t stride = sizeof(float) * 4;
-
-    VkVertexInputBindingDescription vert_bind_descs[] = {
-        {0, stride, VK_VERTEX_INPUT_RATE_VERTEX}};
-    uint32_t vert_bind_descs_cnt =
-        sizeof(vert_bind_descs) / sizeof(*vert_bind_descs);
-
-    VkVertexInputAttributeDescription vert_attr_descs[] = {
-        {0, 0, VK_FORMAT_R32G32_SFLOAT, 0},
-        {1, 0, VK_FORMAT_R32G32_SFLOAT, sizeof(float) * 2},
+    VkPipelineShaderStageCreateInfo shader_info = {
+        VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+        0,
+        0,
+        VK_SHADER_STAGE_COMPUTE_BIT,
+        compute_shader,
+        "main",
+        0,
     };
-    uint32_t vert_attr_descs_cnt =
-        sizeof(vert_attr_descs) / sizeof(*vert_attr_descs);
-
-    VkPipelineVertexInputStateCreateInfo vert_input_info = {
-        VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
-        0,
-        0,
-        vert_bind_descs_cnt,
-        vert_bind_descs,
-        vert_attr_descs_cnt,
-        vert_attr_descs,
-    };
-
-    VkPipelineInputAssemblyStateCreateInfo input_asm_info = {
-        VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
-        0,
-        0,
-        VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
-        VK_FALSE,
-    };
-
-    VkPipelineDynamicStateCreateInfo dyn_st_info = {
-        VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO, 0, 0, 0, 0,
-    };
-
-    VkViewport view_ports[] = {
-        {0, 0, (float)ctx->extent.width, (float)ctx->extent.height, 0, 0}};
-    uint32_t view_ports_cnt = sizeof(view_ports) / sizeof(*view_ports);
-
-    VkRect2D scissors[] = {{{0, 0}, ctx->extent}};
-    uint32_t scissors_cnt = sizeof(scissors) / sizeof(*scissors);
-
-    VkPipelineViewportStateCreateInfo view_port_info = {
-        VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO,
-        0,
-        0,
-        view_ports_cnt,
-        view_ports,
-        scissors_cnt,
-        scissors};
-
-    VkPipelineRasterizationStateCreateInfo raster_info = {
-        VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
-        0,
-        0,
-        VK_FALSE,
-        VK_FALSE,
-        VK_POLYGON_MODE_FILL,
-        VK_CULL_MODE_BACK_BIT,
-        VK_FRONT_FACE_CLOCKWISE,
-        VK_FALSE,
-        0,
-        0,
-        0,
-        1.f};
-
-    VkPipelineMultisampleStateCreateInfo multsample_info = {
-        VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
-        0,
-        0,
-        VK_SAMPLE_COUNT_1_BIT,
-        VK_FALSE,
-        0,
-        0,
-        VK_FALSE,
-        VK_FALSE,
-    };
-
-    VkFlags color_mask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
-                         VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
-    VkPipelineColorBlendAttachmentState color_blends[] = {{
-        VK_TRUE,
-        VK_BLEND_FACTOR_SRC_ALPHA,
-        VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA,
-        VK_BLEND_OP_ADD,
-        VK_BLEND_FACTOR_SRC_ALPHA,
-        VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA,
-        VK_BLEND_OP_ADD,
-        color_mask,
-    }};
-    uint32_t color_blends_cnt = sizeof(color_blends) / sizeof(*color_blends);
-
-    VkPipelineColorBlendStateCreateInfo color_blend_info = {
-        VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
-        0,
-        0,
-        VK_FALSE,
-        VK_LOGIC_OP_CLEAR,
-        color_blends_cnt,
-        color_blends,
-        {0, 0, 0, 0}};
 
     VkPipelineLayoutCreateInfo pipeline_lay_info = {
         VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
@@ -563,34 +432,22 @@ void create_graphics_pipeline(Arena **arena, Context *ctx) {
     assert(ret == VK_SUCCESS && "Could not create the Pipeline Layout");
     push_destroyer(ctx, DestroyPipelineLayout, Handle, ctx->pipeline_lay);
 
-    VkGraphicsPipelineCreateInfo pipeline_info = {
-        VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
+    VkComputePipelineCreateInfo pipeline_info = {
+        VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
         0,
         0,
-        shader_info_cnt,
         shader_info,
-        &vert_input_info,
-        &input_asm_info,
-        0,
-        &view_port_info,
-        &raster_info,
-        &multsample_info,
-        0,
-        &color_blend_info,
-        &dyn_st_info,
         ctx->pipeline_lay,
-        ctx->rendpass,
-        0, // subpass idx
         0,
-        0};
+        0,
+    };
 
-    ret = vkCreateGraphicsPipelines(ctx->dev, VK_NULL_HANDLE, 1, &pipeline_info,
-                                    0, &ctx->pipeline);
+    ret = vkCreateComputePipelines(ctx->dev, VK_NULL_HANDLE, 1, &pipeline_info,
+                                   0, &ctx->pipeline);
     assert(ret == VK_SUCCESS && "Could not create the Graphics Pipeline");
     push_destroyer(ctx, DestroyPipeline, Handle, ctx->pipeline);
 
-    vkDestroyShaderModule(ctx->dev, vert_shader, 0);
-    vkDestroyShaderModule(ctx->dev, frag_shader, 0);
+    vkDestroyShaderModule(ctx->dev, compute_shader, 0);
 }
 
 uint32_t find_vkmem_type(Context *ctx, uint32_t filter,
@@ -696,45 +553,6 @@ void create_buf(Context *ctx, VkDeviceSize size, VkBufferUsageFlags use,
     assert(vk_ret == VK_SUCCESS && "Could not bind Staging Buffer to Memory");
 }
 
-VkBool32 create_rendpass(Arena **arena, Context *ctx) {
-    VkAttachmentDescription color_atts[] = {{
-        0,
-        ctx->img_format,
-        VK_SAMPLE_COUNT_1_BIT,
-        VK_ATTACHMENT_LOAD_OP_CLEAR,
-        VK_ATTACHMENT_STORE_OP_STORE,
-        VK_ATTACHMENT_LOAD_OP_DONT_CARE,
-        VK_ATTACHMENT_STORE_OP_DONT_CARE,
-        VK_IMAGE_LAYOUT_UNDEFINED,
-        VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
-    }};
-    uint32_t color_atts_cnt = sizeof(color_atts) / sizeof(*color_atts);
-
-    VkAttachmentReference color_refs[] = {{
-        0,
-        VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-    }};
-    uint32_t color_refs_cnt = sizeof(color_refs) / sizeof(*color_refs);
-
-    VkSubpassDescription subpasses[] = {{0, VK_PIPELINE_BIND_POINT_GRAPHICS, 0,
-                                         0, color_refs_cnt, color_refs, 0, 0, 0,
-                                         0}};
-    uint32_t subpasses_cnt = sizeof(subpasses) / sizeof(*subpasses);
-
-    VkRenderPassCreateInfo rendpass_info = {
-        VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO,
-        0,
-        0,
-        color_atts_cnt,
-        color_atts,
-        subpasses_cnt,
-        subpasses,
-        0,
-        0};
-
-    return vkCreateRenderPass(ctx->dev, &rendpass_info, 0, &ctx->rendpass);
-}
-
 void create_swapchain(Arena **arena, Context *ctx) {
     [[maybe_unused]] VkBool32 vk_ret;
 
@@ -762,7 +580,7 @@ void create_swapchain(Arena **arena, Context *ctx) {
         VK_COLOR_SPACE_SRGB_NONLINEAR_KHR,
         ctx->extent,
         1,
-        VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
+        VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
         VK_SHARING_MODE_EXCLUSIVE,
         0,
         0,
@@ -828,7 +646,7 @@ void update_swapchain(Context *ctx) {
         VK_COLOR_SPACE_SRGB_NONLINEAR_KHR,
         ctx->extent,
         1,
-        VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
+        VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
         VK_SHARING_MODE_EXCLUSIVE,
         0,
         0,
@@ -848,7 +666,6 @@ void update_swapchain(Context *ctx) {
     assert(vk_ret == VK_SUCCESS && "Could not get updated valid Images");
 
     for (uint32_t i = 0; i < ctx->img_cnt; i++) {
-        vkDestroyFramebuffer(ctx->dev, ctx->fb[i], 0);
         vkDestroyImageView(ctx->dev, ctx->img_view[i], 0);
     }
 
@@ -856,23 +673,6 @@ void update_swapchain(Context *ctx) {
         vk_ret = create_img_view(ctx, ctx->img_view + i, ctx->img[i],
                                  ctx->img_format);
         assert(vk_ret == VK_SUCCESS && "Could not update an Image View");
-
-        VkImageView img_views[] = {ctx->img_view[i]};
-        uint32_t img_views_cnt = sizeof(img_views) / sizeof(*img_views);
-
-        VkFramebufferCreateInfo fb_info = {
-            VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO,
-            0,
-            0,
-            ctx->rendpass,
-            img_views_cnt,
-            img_views,
-            ctx->extent.width,
-            ctx->extent.height,
-            1};
-
-        vk_ret = vkCreateFramebuffer(ctx->dev, &fb_info, 0, ctx->fb + i);
-        assert(vk_ret == VK_SUCCESS && "Could not update a Framebuffer");
     }
 
     vkDestroySwapchainKHR(ctx->dev, ctx->old_swapchain, 0);
@@ -881,9 +681,9 @@ void update_swapchain(Context *ctx) {
 void create_desc(Context *ctx) {
     [[maybe_unused]] VkBool32 vk_ret = 0;
     VkDescriptorSetLayoutBinding desc_lay_binds[] = {
-        {0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1,
-         VK_SHADER_STAGE_FRAGMENT_BIT, 0},
-        {1, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_VERTEX_BIT,
+        {0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT,
+         0},
+        {1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT,
          0}};
     uint32_t desc_lay_binds_cnt =
         sizeof(desc_lay_binds) / sizeof(*desc_lay_binds);
@@ -899,8 +699,8 @@ void create_desc(Context *ctx) {
                    ctx->desc_lay);
 
     VkDescriptorPoolSize desc_pool_sizes[] = {
-        {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1},
-        {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1}};
+        {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1},
+        {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1}};
     uint32_t desc_pool_sizes_cnt =
         sizeof(desc_pool_sizes) / sizeof(*desc_pool_sizes);
 
@@ -1040,7 +840,7 @@ void init_ctx(Arena **arena, Context *ctx) {
     push_destroyer(ctx, DestroyDebugUtilsMessenger, Handle, ctx->dbg_msger);
 
     glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
-    ctx->window = glfwCreateWindow(640, 480, "EinEdit", 0, 0);
+    ctx->window = glfwCreateWindow(800, 600, "EinEdit", 0, 0);
     assert(ctx->window && "not create a GLFW Window");
     push_destroyer(ctx, DestroyGLFWWindow, Handle, 0);
 
@@ -1067,13 +867,13 @@ void init_ctx(Arena **arena, Context *ctx) {
 
     ctx->qf_idx = UINT32_MAX;
     for (size_t i = 0; i < qfprops_cnt; i++) {
-        if (qfprops[i].queueFlags & VK_QUEUE_GRAPHICS_BIT) {
+        if (qfprops[i].queueFlags & VK_QUEUE_COMPUTE_BIT) {
             ctx->qf_idx = i;
             break;
         }
     }
     assert(ctx->qf_idx != UINT32_MAX &&
-           "Could not query Queue Family Properties for Graphics");
+           "Could not query Queue Family Properties for Compute");
 
     ret = glfwGetPhysicalDevicePresentationSupport(ctx->inst, ctx->phy_dev,
                                                    ctx->qf_idx);
@@ -1091,9 +891,13 @@ void init_ctx(Arena **arena, Context *ctx) {
     const char *dev_exts[] = {VK_KHR_SWAPCHAIN_EXTENSION_NAME};
     uint32_t dev_exts_cnt = sizeof(dev_exts) / sizeof(*dev_exts);
 
+    VkPhysicalDeviceSynchronization2Features feats = {
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SYNCHRONIZATION_2_FEATURES, 0,
+        VK_TRUE};
+
     VkDeviceCreateInfo dev_info = {
         VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
-        0,
+        &feats,
         0,
         queue_infos_cnt,
         queue_infos,
@@ -1112,31 +916,6 @@ void init_ctx(Arena **arena, Context *ctx) {
     assert(ctx->queue && "Could not create a Queue");
 
     create_swapchain(arena, ctx);
-
-    vk_ret = create_rendpass(arena, ctx);
-    assert(vk_ret == VK_SUCCESS && "Could not create a Render Pass");
-    push_destroyer(ctx, DestroyRenderPass, Handle, ctx->rendpass);
-
-    ctx->fb = alloc_arr(arena, ctx->img_cnt, typeof(*ctx->fb));
-    for (uint32_t i = 0; i < ctx->img_cnt; i++) {
-        VkImageView img_views[] = {ctx->img_view[i]};
-        uint32_t img_views_cnt = sizeof(img_views) / sizeof(*img_views);
-
-        VkFramebufferCreateInfo fb_info = {
-            VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO,
-            0,
-            0,
-            ctx->rendpass,
-            img_views_cnt,
-            img_views,
-            ctx->extent.width,
-            ctx->extent.height,
-            1};
-
-        vk_ret = vkCreateFramebuffer(ctx->dev, &fb_info, 0, ctx->fb + i);
-        assert(vk_ret == VK_SUCCESS && "Could not create a Framebuffer");
-        push_destroyer(ctx, DestroyFramebuffer, PointerToHandle, ctx->fb + i);
-    }
 
     VkSemaphoreCreateInfo sem_info = {VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO,
                                       0, 0};
@@ -1178,7 +957,7 @@ void init_ctx(Arena **arena, Context *ctx) {
 
     create_desc(ctx);
 
-    create_graphics_pipeline(arena, ctx);
+    create_compute_pipeline(arena, ctx);
 
     VkFenceCreateInfo fence_info = {
         VK_STRUCTURE_TYPE_FENCE_CREATE_INFO,
@@ -1198,249 +977,57 @@ void init_ctx(Arena **arena, Context *ctx) {
     ctx->resize_flag = 0;
 }
 
-void setup_texture(Context *ctx, uint32_t *tex, uint32_t tex_size,
-                   VkExtent3D extent) {
-    [[maybe_unused]] VkBool32 vk_ret;
-    VkBuffer staging_buf;
-    VkDeviceMemory staging_buf_mem;
-
-    create_buf(ctx, tex_size, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-               VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
-                   VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-               &staging_buf, &staging_buf_mem);
-
-    void *data;
-    vk_ret = vkMapMemory(ctx->dev, staging_buf_mem, 0, tex_size, 0, &data);
-    assert(vk_ret == VK_SUCCESS && "Could not map Staging Buffer Memory");
-    memcpy(data, tex, tex_size);
-    vkUnmapMemory(ctx->dev, staging_buf_mem);
-
-    VkImageCreateInfo img_info = {
-        VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
-        0,
-        0,
-        VK_IMAGE_TYPE_2D,
-        VK_FORMAT_R8G8B8A8_SRGB,
-        extent,
-        1,
-        1,
-        VK_SAMPLE_COUNT_1_BIT,
-        VK_IMAGE_TILING_OPTIMAL,
-        VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
-        VK_SHARING_MODE_EXCLUSIVE,
-        0,
-        0,
-        VK_IMAGE_LAYOUT_UNDEFINED,
-    };
-
-    vk_ret = vkCreateImage(ctx->dev, &img_info, 0, &ctx->tex_img);
-    assert(vk_ret == VK_SUCCESS && "Could not create an Image");
-    push_destroyer(ctx, DestroyImage, Handle, ctx->tex_img);
-
-    VkMemoryRequirements req = {0};
-    vkGetImageMemoryRequirements(ctx->dev, ctx->tex_img, &req);
-    uint32_t mem_type_idx = find_vkmem_type(
-        ctx, req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-    VkMemoryAllocateInfo alloc_info = (VkMemoryAllocateInfo){
-        VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
-        0,
-        req.size,
-        mem_type_idx,
-    };
-    vk_ret = vkAllocateMemory(ctx->dev, &alloc_info, 0, &ctx->tex_img_mem);
-    assert(vk_ret == VK_SUCCESS && "Could not alloc Texture Image Memory");
-    push_destroyer(ctx, FreeMemory, Handle, ctx->tex_img_mem);
-
-    vk_ret = vkBindImageMemory(ctx->dev, ctx->tex_img, ctx->tex_img_mem, 0);
-    assert(vk_ret == VK_SUCCESS && "Could not bind Image to Memory");
-
-    VkCommandBuffer cmd_buf;
-    vk_ret = begin_cmds_once(ctx, &cmd_buf);
-    assert(vk_ret == VK_SUCCESS && "Could not begin Command Buffer");
-    VkImageSubresourceRange res_range = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
-
-    VkImageMemoryBarrier bars[] = {
-        {VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, 0, 0,
-         VK_ACCESS_TRANSFER_WRITE_BIT, VK_IMAGE_LAYOUT_UNDEFINED,
-         VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_QUEUE_FAMILY_IGNORED,
-         VK_QUEUE_FAMILY_IGNORED, ctx->tex_img, res_range}};
-    uint32_t bars_cnt = sizeof(bars) / sizeof(*bars);
-
-    vkCmdPipelineBarrier(cmd_buf, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
-                         VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, 0, 0, 0,
-                         bars_cnt, bars);
-
-    VkImageSubresourceLayers res_lay = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-    VkBufferImageCopy img_copy = {0, 0, 0, res_lay, {0, 0, 0}, extent};
-
-    vkCmdCopyBufferToImage(cmd_buf, staging_buf, ctx->tex_img,
-                           VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &img_copy);
-
-    bars[0] = (VkImageMemoryBarrier){VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
-                                     0,
-                                     VK_ACCESS_TRANSFER_WRITE_BIT,
-                                     VK_ACCESS_SHADER_READ_BIT,
-                                     VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                                     VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                                     VK_QUEUE_FAMILY_IGNORED,
-                                     VK_QUEUE_FAMILY_IGNORED,
-                                     ctx->tex_img,
-                                     res_range};
-
-    vkCmdPipelineBarrier(cmd_buf, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                         VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, 0, 0, 0,
-                         bars_cnt, bars);
-
-    end_cmds_once(ctx, cmd_buf);
-
-    vkDestroyBuffer(ctx->dev, staging_buf, 0);
-    vkFreeMemory(ctx->dev, staging_buf_mem, 0);
-
-    vk_ret = create_img_view(ctx, &ctx->tex_img_view, ctx->tex_img,
-                             VK_FORMAT_R8G8B8A8_SRGB);
-    assert(vk_ret == VK_SUCCESS && "Could not create an Image View");
-    push_destroyer(ctx, DestroyImageView, Handle, ctx->tex_img_view);
-
-    VkSamplerCreateInfo sampler_info = {
-        VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
-        0,
-        0,
-        VK_FILTER_NEAREST,
-        VK_FILTER_NEAREST,
-        VK_SAMPLER_MIPMAP_MODE_LINEAR,
-        VK_SAMPLER_ADDRESS_MODE_REPEAT,
-        VK_SAMPLER_ADDRESS_MODE_REPEAT,
-        VK_SAMPLER_ADDRESS_MODE_REPEAT,
-        0.f,
-        VK_FALSE,
-        16.f,
-        VK_FALSE,
-        VK_COMPARE_OP_ALWAYS,
-        0.f,
-        VK_LOD_CLAMP_NONE,
-        VK_BORDER_COLOR_INT_OPAQUE_BLACK,
-        VK_FALSE,
-    };
-
-    vk_ret = vkCreateSampler(ctx->dev, &sampler_info, 0, &ctx->tex_sampler);
-    assert(vk_ret == VK_SUCCESS && "Could not create the Sampler");
-    push_destroyer(ctx, DestroySampler, Handle, ctx->tex_sampler);
-}
-
-void setup_vertices(Context *ctx, float *vert, uint32_t vert_size) {
-    [[maybe_unused]] VkBool32 vk_ret = 0;
-    create_buf(ctx, vert_size, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-               VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
-                   VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-               &ctx->staging_buf, &ctx->staging_mem);
-
-    void *data;
-    vk_ret = vkMapMemory(ctx->dev, ctx->staging_mem, 0, vert_size, 0, &data);
-    assert(vk_ret == VK_SUCCESS && "Could not map Memory");
-    memcpy(data, vert, vert_size);
-    vkUnmapMemory(ctx->dev, ctx->staging_mem);
-
-    create_buf(
-        ctx, vert_size,
-        VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-        VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, &ctx->vert_buf, &ctx->vert_mem);
-
-    VkCommandBuffer cmd_buf;
-    vk_ret = begin_cmds_once(ctx, &cmd_buf);
-    assert(vk_ret == VK_SUCCESS && "Could not begin Commands");
-
-    VkBufferCopy copies[] = {{0, 0, vert_size}};
-    uint32_t copies_cnt = sizeof(copies) / sizeof(*copies);
-
-    vkCmdCopyBuffer(cmd_buf, ctx->staging_buf, ctx->vert_buf, copies_cnt,
-                    copies);
-
-    end_cmds_once(ctx, cmd_buf);
-
-    vkDestroyBuffer(ctx->dev, ctx->staging_buf, 0);
-    vkFreeMemory(ctx->dev, ctx->staging_mem, 0);
-
-    push_destroyer(ctx, DestroyBuffer, Handle, ctx->vert_buf);
-    push_destroyer(ctx, FreeMemory, Handle, ctx->vert_mem);
-
-    ctx->vert_cnt = (vert_size / sizeof(float)) / 2;
-}
-
-void setup_indices(Context *ctx, uint32_t *idx, uint32_t idx_size) {
-    [[maybe_unused]] VkBool32 vk_ret = 0;
-    create_buf(ctx, idx_size, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-               VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
-                   VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-               &ctx->staging_buf, &ctx->staging_mem);
-
-    void *data;
-    vk_ret = vkMapMemory(ctx->dev, ctx->staging_mem, 0, idx_size, 0, &data);
-    assert(vk_ret == VK_SUCCESS && "Could not map Memory");
-    memcpy(data, idx, idx_size);
-    vkUnmapMemory(ctx->dev, ctx->staging_mem);
-
-    create_buf(
-        ctx, idx_size,
-        VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-        VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, &ctx->idx_buf, &ctx->idx_mem);
-
-    VkCommandBuffer cmd_buf;
-    vk_ret = begin_cmds_once(ctx, &cmd_buf);
-    assert(vk_ret == VK_SUCCESS && "Could not begin Commands");
-
-    VkBufferCopy copies[] = {{0, 0, idx_size}};
-    uint32_t copies_cnt = sizeof(copies) / sizeof(*copies);
-
-    vkCmdCopyBuffer(cmd_buf, ctx->staging_buf, ctx->idx_buf, copies_cnt,
-                    copies);
-
-    end_cmds_once(ctx, cmd_buf);
-
-    vkDestroyBuffer(ctx->dev, ctx->staging_buf, 0);
-    vkFreeMemory(ctx->dev, ctx->staging_mem, 0);
-
-    push_destroyer(ctx, DestroyBuffer, Handle, ctx->idx_buf);
-    push_destroyer(ctx, FreeMemory, Handle, ctx->idx_mem);
-
-    ctx->idx_cnt = idx_size / sizeof(uint32_t);
-}
-
-void setup_proj(Context *ctx, float *proj, uint32_t proj_size) {
-    [[maybe_unused]] VkBool32 vk_ret = 0;
-    create_buf(ctx, proj_size, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
-               VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
-                   VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-               &ctx->uni_buf, &ctx->uni_mem);
-
-    vk_ret = vkMapMemory(ctx->dev, ctx->uni_mem, 0, proj_size, 0,
-                         (void *)&ctx->proj_mat);
-    assert(vk_ret == VK_SUCCESS && "Could not map Memory");
-    memcpy(ctx->proj_mat, proj, proj_size);
-
-    push_destroyer(ctx, DestroyBuffer, Handle, ctx->uni_buf);
-    push_destroyer(ctx, FreeMemory, Handle, ctx->uni_mem);
-    push_destroyer(ctx, UnmapMemory, Handle, ctx->uni_mem);
-}
-
-void update_desc(Context *ctx, uint32_t uni_size) {
-    VkDescriptorImageInfo desc_img_info = {
-        ctx->tex_sampler, ctx->tex_img_view,
-        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
-
-    VkDescriptorBufferInfo desc_uni_info = {ctx->uni_buf, 0, uni_size};
+void update_desc(Context *ctx, uint32_t storage_size) {
+    VkDescriptorImageInfo desc_image_info = {0, ctx->storage_img_view,
+                                             VK_IMAGE_LAYOUT_GENERAL};
+    VkDescriptorBufferInfo desc_storage_info = {ctx->storage_buf, 0,
+                                                storage_size};
 
     VkWriteDescriptorSet write_descs[] = {
         {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, 0, ctx->desc, 0, 0, 1,
-         VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &desc_img_info, 0, 0},
+         VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 0, &desc_storage_info, 0},
         {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, 0, ctx->desc, 1, 0, 1,
-         VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 0, &desc_uni_info, 0}};
+         VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, &desc_image_info, 0, 0}};
     uint32_t write_descs_cnt = sizeof(write_descs) / sizeof(*write_descs);
 
     vkUpdateDescriptorSets(ctx->dev, write_descs_cnt, write_descs, 0, 0);
 }
 
-void draw(Arena *arena, Context *ctx) {
+void transition_imgs(Arena **arena, Context *ctx, VkCommandBuffer cmd_buf,
+                     VkPipelineStageFlagBits2 *src_stages,
+                     VkPipelineStageFlagBits2 *dst_stages,
+                     VkImageLayout *src_lays, VkImageLayout *dst_lays,
+                     VkImage *imgs, uint32_t imgs_cnt) {
+    start_scratch(*arena);
+    VkImageMemoryBarrier2 *barriers =
+        alloc_arr(arena, imgs_cnt, VkImageMemoryBarrier2);
+    for (size_t i = 0; i < imgs_cnt; i++) {
+        barriers[i] =
+            (VkImageMemoryBarrier2){VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
+                                    0,
+                                    src_stages[i],
+                                    0,
+                                    dst_stages[i],
+                                    0,
+                                    src_lays[i],
+                                    dst_lays[i],
+                                    ctx->qf_idx,
+                                    ctx->qf_idx,
+                                    imgs[i],
+                                    {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1}};
+    };
+
+    VkDependencyInfo dep_info = {
+        VK_STRUCTURE_TYPE_DEPENDENCY_INFO, 0, 0, 0, 0, 0, 0, imgs_cnt, barriers,
+    };
+
+    vkCmdPipelineBarrier2(cmd_buf, &dep_info);
+    end_scratch(*arena);
+}
+
+void draw(Arena **arena, Context *ctx) {
     [[maybe_unused]] VkBool32 vk_ret;
+    VkCommandBuffer cmd_buf = ctx->cmd_buf[ctx->frame_idx];
 
     vkWaitForFences(ctx->dev, 1, ctx->fence + ctx->frame_idx, VK_TRUE,
                     UINT64_MAX);
@@ -1462,58 +1049,64 @@ void draw(Arena *arena, Context *ctx) {
 
     vkResetFences(ctx->dev, 1, ctx->fence + ctx->frame_idx);
 
-    vk_ret = vkResetCommandBuffer(ctx->cmd_buf[ctx->frame_idx], 0);
+    vk_ret = vkResetCommandBuffer(cmd_buf, 0);
     assert(vk_ret == VK_SUCCESS && "Could not reset Command Buffer");
     VkCommandBufferBeginInfo begin_info = {
         VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO, 0, 0, 0};
 
-    vk_ret = vkBeginCommandBuffer(ctx->cmd_buf[ctx->frame_idx], &begin_info);
+    vk_ret = vkBeginCommandBuffer(cmd_buf, &begin_info);
     assert(vk_ret == VK_SUCCESS && "Could not begin Command Buffer");
 
-    VkOffset2D rend_off = {0, 0};
-    VkRect2D rend = {rend_off, ctx->extent};
+    VkPipelineStageFlagBits2 all_stages[] = {
+        VK_PIPELINE_STAGE_2_NONE,
+        VK_PIPELINE_STAGE_2_NONE,
+        VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+        VK_PIPELINE_STAGE_2_NONE,
+        VK_PIPELINE_STAGE_2_BLIT_BIT,
+        VK_PIPELINE_STAGE_2_BLIT_BIT};
+    VkImageLayout all_lays[] = {VK_IMAGE_LAYOUT_UNDEFINED,
+                                VK_IMAGE_LAYOUT_UNDEFINED,
+                                VK_IMAGE_LAYOUT_GENERAL,
+                                VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+                                VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                                VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL};
+    VkImage imgs[] = {ctx->storage_img, ctx->img[img_idx]};
+    uint32_t imgs_cnt = sizeof(imgs) / sizeof(*imgs);
+    transition_imgs(arena, ctx, cmd_buf, all_stages, all_stages + imgs_cnt,
+                    all_lays, all_lays + imgs_cnt, imgs, imgs_cnt);
 
-    // Simple variation of the background color
-    VkClearValue clear_vals[] = {
-        {{{0., 0., (((float)(ctx->frame_cnt % 100) / 100) / 2) + 0.5, 1.}}}};
-    uint32_t clear_vals_cnt = sizeof(clear_vals) / sizeof(*clear_vals);
-
-    VkRenderPassBeginInfo rendpass_begin_info = {
-        VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
-        0,
-        ctx->rendpass,
-        ctx->fb[img_idx],
-        rend,
-        clear_vals_cnt,
-        clear_vals};
-
-    vkCmdBeginRenderPass(ctx->cmd_buf[ctx->frame_idx], &rendpass_begin_info,
-                         VK_SUBPASS_CONTENTS_INLINE);
-
-    vkCmdBindPipeline(ctx->cmd_buf[ctx->frame_idx],
-                      VK_PIPELINE_BIND_POINT_GRAPHICS, ctx->pipeline);
+    vkCmdBindPipeline(cmd_buf, VK_PIPELINE_BIND_POINT_COMPUTE, ctx->pipeline);
 
     VkDescriptorSet descs[] = {ctx->desc};
     uint32_t descs_cnt = sizeof(descs) / sizeof(*descs);
-    vkCmdBindDescriptorSets(ctx->cmd_buf[ctx->frame_idx],
-                            VK_PIPELINE_BIND_POINT_GRAPHICS, ctx->pipeline_lay,
-                            0, descs_cnt, descs, 0, 0);
+    vkCmdBindDescriptorSets(cmd_buf, VK_PIPELINE_BIND_POINT_COMPUTE,
+                            ctx->pipeline_lay, 0, descs_cnt, descs, 0, 0);
 
-    VkDeviceSize offsets[] = {0};
-    VkBuffer vert_bufs[] = {ctx->vert_buf};
-    uint32_t vert_bufs_cnt = sizeof(vert_bufs) / sizeof(*vert_bufs);
-    vkCmdBindVertexBuffers(ctx->cmd_buf[ctx->frame_idx], 0, vert_bufs_cnt,
-                           vert_bufs, offsets);
+    vkCmdDispatch(cmd_buf, 16, 16, 1);
 
-    vkCmdBindIndexBuffer(ctx->cmd_buf[ctx->frame_idx], ctx->idx_buf, 0,
-                         VK_INDEX_TYPE_UINT32);
+    transition_imgs(arena, ctx, cmd_buf, all_stages + imgs_cnt,
+                    all_stages + imgs_cnt * 2, all_lays + imgs_cnt,
+                    all_lays + imgs_cnt * 2, imgs, imgs_cnt);
 
-    vkCmdDrawIndexed(ctx->cmd_buf[ctx->frame_idx], ctx->idx_cnt, 1, 0, 0, 0);
+    VkImageBlit blit = {
+        {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
+        {{0, 0, 0}, {ctx->extent.width, ctx->extent.height, 1}},
+        {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
+        {{0, 0, 0}, {ctx->extent.width, ctx->extent.height, 1}},
+    };
 
-    vkCmdEndRenderPass(ctx->cmd_buf[ctx->frame_idx]);
-    vkEndCommandBuffer(ctx->cmd_buf[ctx->frame_idx]);
+    vkCmdBlitImage(cmd_buf, ctx->storage_img,
+                   VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, ctx->img[img_idx],
+                   VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit,
+                   VK_FILTER_NEAREST);
 
-    VkCommandBuffer cmd_bufs[] = {ctx->cmd_buf[ctx->frame_idx]};
+    transition_imgs(arena, ctx, cmd_buf, all_stages + imgs_cnt * 2,
+                    all_stages + imgs_cnt, all_lays + imgs_cnt * 2,
+                    all_lays + imgs_cnt, imgs, imgs_cnt);
+
+    vkEndCommandBuffer(cmd_buf);
+
+    VkCommandBuffer cmd_bufs[] = {cmd_buf};
     uint32_t cmd_bufs_cnt = sizeof(cmd_bufs) / sizeof(*cmd_bufs);
 
     VkSemaphore img_avails[] = {ctx->img_avail[ctx->frame_idx]};
@@ -1522,8 +1115,8 @@ void draw(Arena *arena, Context *ctx) {
     VkSemaphore rend_dones[] = {ctx->rend_done[img_idx]};
     uint32_t rend_dones_cnt = sizeof(rend_dones) / sizeof(*rend_dones);
 
-    VkPipelineStageFlags stage_flags[] = {
-        VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT};
+    VkPipelineStageFlags stage_flags[] = {VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                                          VK_PIPELINE_STAGE_TRANSFER_BIT};
 
     VkSubmitInfo submit_info = {VK_STRUCTURE_TYPE_SUBMIT_INFO,
                                 0,
@@ -1568,58 +1161,106 @@ void draw(Arena *arena, Context *ctx) {
 
 void resize(Context *ctx) {
     update_swapchain(ctx);
-    ctx->proj_mat[0] = 2.f / (float)ctx->extent.width;
-    ctx->proj_mat[5] = 2.f / (float)ctx->extent.height;
     ctx->resize_flag = 0;
+}
+
+void setup_img_buf(Context *ctx, VkExtent3D extent) {
+    [[maybe_unused]] VkBool32 vk_ret = 0;
+    VkImageCreateInfo img_info = {
+        VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+        0,
+        0,
+        VK_IMAGE_TYPE_2D,
+        VK_FORMAT_R16G16B16A16_SFLOAT,
+        extent,
+        1,
+        1,
+        VK_SAMPLE_COUNT_1_BIT,
+        VK_IMAGE_TILING_OPTIMAL,
+        VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
+            VK_IMAGE_USAGE_STORAGE_BIT,
+        VK_SHARING_MODE_EXCLUSIVE,
+        0,
+        0,
+        VK_IMAGE_LAYOUT_UNDEFINED,
+    };
+
+    vk_ret = vkCreateImage(ctx->dev, &img_info, 0, &ctx->storage_img);
+    assert(vk_ret == VK_SUCCESS && "Could not create an Image");
+    push_destroyer(ctx, DestroyImage, Handle, ctx->storage_img);
+
+    VkMemoryRequirements req = {0};
+    vkGetImageMemoryRequirements(ctx->dev, ctx->storage_img, &req);
+    uint32_t mem_type_idx = find_vkmem_type(
+        ctx, req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+    VkMemoryAllocateInfo alloc_info = (VkMemoryAllocateInfo){
+        VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+        0,
+        req.size,
+        mem_type_idx,
+    };
+
+    vk_ret = vkAllocateMemory(ctx->dev, &alloc_info, 0, &ctx->storage_img_mem);
+    assert(vk_ret == VK_SUCCESS && "Could not alloc Image Memory");
+    push_destroyer(ctx, FreeMemory, Handle, ctx->storage_img_mem);
+
+    vk_ret =
+        vkBindImageMemory(ctx->dev, ctx->storage_img, ctx->storage_img_mem, 0);
+    assert(vk_ret == VK_SUCCESS && "Could not bind Image to Memory");
+
+    vk_ret = create_img_view(ctx, &ctx->storage_img_view, ctx->storage_img,
+                             VK_FORMAT_R16G16B16A16_SFLOAT);
+    assert(vk_ret == VK_SUCCESS && "Could not get View to Image");
+    push_destroyer(ctx, DestroyImageView, Handle, ctx->storage_img_view);
+}
+
+void setup_storage(Context *ctx, void *storage, uint32_t storage_size) {
+    [[maybe_unused]] VkBool32 vk_ret = 0;
+    create_buf(ctx, storage_size, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+               VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                   VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+               &ctx->staging_buf, &ctx->staging_mem);
+
+    void *data;
+    vk_ret = vkMapMemory(ctx->dev, ctx->staging_mem, 0, storage_size, 0, &data);
+    assert(vk_ret == VK_SUCCESS && "Could not map Memory");
+    memcpy(data, storage, storage_size);
+    vkUnmapMemory(ctx->dev, ctx->staging_mem);
+
+    create_buf(ctx, storage_size,
+               VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
+                   VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+               VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, &ctx->storage_buf,
+               &ctx->storage_mem);
+
+    VkCommandBuffer cmd_buf;
+    vk_ret = begin_cmds_once(ctx, &cmd_buf);
+    assert(vk_ret == VK_SUCCESS && "Could not begin Commands");
+
+    VkBufferCopy copies[] = {{0, 0, storage_size}};
+    uint32_t copies_cnt = sizeof(copies) / sizeof(*copies);
+
+    vkCmdCopyBuffer(cmd_buf, ctx->staging_buf, ctx->storage_buf, copies_cnt,
+                    copies);
+
+    end_cmds_once(ctx, cmd_buf);
+
+    vkDestroyBuffer(ctx->dev, ctx->staging_buf, 0);
+    vkFreeMemory(ctx->dev, ctx->staging_mem, 0);
+
+    push_destroyer(ctx, DestroyBuffer, Handle, ctx->storage_buf);
+    push_destroyer(ctx, FreeMemory, Handle, ctx->storage_mem);
 }
 
 void setup_bufs(Arena **arena, Context *ctx) {
     FontLUT font = load_font(arena, "unscii-8.bin");
     size_t lett = font_type_to_bytes(font.type);
 
-    uint32_t *texture = alloc_arr(arena, 8 * lett * 2, uint32_t);
-    VkDeviceSize texture_size = 8 * lett * 2 * sizeof(*texture);
+    setup_img_buf(ctx, (VkExtent3D){ctx->extent.width, ctx->extent.height, 1});
 
-    for (size_t i = lett * 49, j = 0; j < lett * 2; i++, j++) {
-        for (size_t k = 0; k < 8; k++) {
-            texture[k + j * 8] =
-                (font.data[i] & (1 << (8 - k))) ? 0xFF000000 : 0x00000000;
-        }
-    }
-    setup_texture(ctx, texture, texture_size, (VkExtent3D){8, lett * 2, 1});
+    setup_storage(ctx, font.data, lett * 128);
 
-    float proj_mat[] = {
-        2.f / (float)ctx->extent.width,
-        0,
-        0,
-        -1,
-        0,
-        2.f / (float)ctx->extent.height,
-        0,
-        -1,
-        0,
-        0,
-        1,
-        0,
-        0,
-        0,
-        0,
-        1,
-    };
-    VkDeviceSize proj_size = sizeof(proj_mat);
-    setup_proj(ctx, proj_mat, proj_size);
-
-    update_desc(ctx, proj_size);
-
-    float verts[] = {
-        0, 0, 0, 0, 50, 0, 1, 0, 0, 100, 0, 1, 50, 100, 1, 1,
-    };
-    VkDeviceSize verts_size = sizeof(verts);
-    setup_vertices(ctx, verts, verts_size);
-
-    uint32_t indices[] = {0, 1, 3, 0, 3, 2};
-    VkDeviceSize indices_size = sizeof(indices);
-    setup_indices(ctx, indices, indices_size);
+    update_desc(ctx, lett * 128);
 }
 
 int main(void) {
@@ -1641,7 +1282,7 @@ int main(void) {
     setup_bufs(&arena, &ctx);
 
     while (!glfwWindowShouldClose(ctx.window)) {
-        draw(arena, &ctx);
+        draw(&arena, &ctx);
 
         if (ctx.resize_flag) {
             resize(&ctx);

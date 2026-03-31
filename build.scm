@@ -31,8 +31,7 @@
                       #:link '("glfw" "vulkan")
                       #:optimization (if release? "-O3" "-O0") #:debug (if release? "" "-g") #:strip release? #:derive (if release? '(NDEBUG) '())))))
 
-  (run-external config shader? #:name "glslc" #:args '("src/shader/basic.vert" "-o" "vert.spv") #:outputs '("vert.spv"))
-  (run-external config shader? #:name "glslc" #:args '("src/shader/basic.frag" "-o" "frag.spv") #:outputs '("frag.spv"))
+  (run-external config shader? #:name "glslc" #:args '("src/shader/base.comp" "-o" "comp.spv") #:outputs '("comp.spv"))
 
   (run-external config font? #:name "asset/hex-to-bin.scm" #:args '("asset/unscii-8") #:outputs '("asset/unscii-8.bin"))
   (run-external config font? #:name "asset/hex-to-bin.scm" #:args '("asset/unscii-16") #:outputs '("asset/unscii-16.bin"))
