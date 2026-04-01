@@ -72,6 +72,7 @@ typedef struct Context {
 
     uint32_t qf_idx;
     VkQueue queue;
+    VkPresentModeKHR present_mode;
     VkSwapchainKHR swapchain;
     VkSwapchainKHR old_swapchain;
     uint32_t img_cnt;
@@ -154,7 +155,8 @@ Arena *new_arena(size_t init_size) {
 }
 
 void *alloc_align(Arena **arena, size_t size, size_t align) {
-    assert(!(align & (align - 1)) && "Expected power of two alignment");
+    assert(align && !(align & (align - 1)) &&
+           "Expected power of two alignment");
     Arena *local = *arena;
     uintptr_t ptr = (uintptr_t)local->space + local->cur + size;
     if (ptr & (align - 1)) {
@@ -570,6 +572,21 @@ void create_swapchain(Arena **arena, Context *ctx) {
                                (int *)&ctx->extent.height);
     }
 
+    uint32_t modes_cnt = 0;
+    vkGetPhysicalDeviceSurfacePresentModesKHR(ctx->phy_dev, ctx->surf,
+                                              &modes_cnt, 0);
+    VkPresentModeKHR *modes = alloc_arr(arena, modes_cnt, typeof(*modes));
+    vkGetPhysicalDeviceSurfacePresentModesKHR(ctx->phy_dev, ctx->surf,
+                                              &modes_cnt, modes);
+
+    ctx->present_mode = VK_PRESENT_MODE_FIFO_KHR;
+    for (uint32_t i = 0; i < modes_cnt; i++) {
+        if (modes[i] == VK_PRESENT_MODE_MAILBOX_KHR) {
+            ctx->present_mode = VK_PRESENT_MODE_MAILBOX_KHR;
+            break;
+        }
+    }
+
     VkSwapchainCreateInfoKHR swapchain_info = {
         VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR,
         0,
@@ -586,7 +603,7 @@ void create_swapchain(Arena **arena, Context *ctx) {
         0,
         surf_caps.currentTransform,
         VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR,
-        VK_PRESENT_MODE_MAILBOX_KHR,
+        ctx->present_mode,
         VK_TRUE,
         0,
     };
@@ -615,6 +632,7 @@ void create_swapchain(Arena **arena, Context *ctx) {
     }
 }
 
+// CONSIDER: swapchain_maintenance1 for better smoother resizing
 void update_swapchain(Context *ctx) {
     [[maybe_unused]] VkBool32 vk_ret;
     vkDeviceWaitIdle(ctx->dev);
@@ -652,7 +670,7 @@ void update_swapchain(Context *ctx) {
         0,
         surf_caps.currentTransform,
         VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR,
-        VK_PRESENT_MODE_MAILBOX_KHR,
+        ctx->present_mode,
         VK_TRUE,
         ctx->old_swapchain,
     };
@@ -1082,7 +1100,7 @@ void draw(Arena **arena, Context *ctx) {
     vkCmdBindDescriptorSets(cmd_buf, VK_PIPELINE_BIND_POINT_COMPUTE,
                             ctx->pipeline_lay, 0, descs_cnt, descs, 0, 0);
 
-    vkCmdDispatch(cmd_buf, 16, 16, 1);
+    vkCmdDispatch(cmd_buf, 32, 32, 1);
 
     transition_imgs(arena, ctx, cmd_buf, all_stages + imgs_cnt,
                     all_stages + imgs_cnt * 2, all_lays + imgs_cnt,
@@ -1090,7 +1108,7 @@ void draw(Arena **arena, Context *ctx) {
 
     VkImageBlit blit = {
         {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
-        {{0, 0, 0}, {ctx->extent.width, ctx->extent.height, 1}},
+        {{0, 0, 0}, {32 * 8, 32 * 8, 1}},
         {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
         {{0, 0, 0}, {ctx->extent.width, ctx->extent.height, 1}},
     };
@@ -1258,9 +1276,9 @@ void setup_bufs(Arena **arena, Context *ctx) {
 
     setup_img_buf(ctx, (VkExtent3D){ctx->extent.width, ctx->extent.height, 1});
 
-    setup_storage(ctx, font.data, lett * 128);
+    setup_storage(ctx, font.data, lett * 1024);
 
-    update_desc(ctx, lett * 128);
+    update_desc(ctx, lett * 1024);
 }
 
 int main(void) {

@@ -1,26 +1,25 @@
 #version 460
 
-layout (local_size_x = 16, local_size_y = 16) in;
+// Fix hardcoded values to font header and constants
+layout (local_size_x = 8, local_size_y = 8) in;
 
-layout(set = 0, binding = 0) readonly uniform BitData {
+layout(std430, set = 0, binding = 0) readonly buffer BitData {
   uint bits[];
 } sbo;
 
 layout(set = 0, binding = 1) writeonly uniform image2D image;
 
-// Simple example
 void main() {
-    ivec2 texelCoord = ivec2(gl_GlobalInvocationID.xy);
-	ivec2 size = imageSize(image);
+    ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 local = ivec2(gl_LocalInvocationID.xy);
 
-    if(texelCoord.x < size.x && texelCoord.y < size.y) {
-        vec4 color = vec4(0.0, 0.0, 0.0, 1.0);
+    vec4 color = vec4(0.0, 0.0, 0.0, 1.0);
 
-        if(gl_LocalInvocationID.x != 0 && gl_LocalInvocationID.y != 0) {
-            color.x = float(texelCoord.x)/(size.x);
-            color.y = float(texelCoord.y)/(size.y);
-        }
+    // Fun arches of the first 1024 (from global group sizes) character codes (excludes 0)
+    // By two as every 8x8 char takes up two uints in bits[]
+    uint char_code = (gl_WorkGroupID.x * gl_WorkGroupID.y + 1) * 2; 
+    float value = sbo.bits[char_code + (local.y / 4)] >> (31 - (((3 - (local.y % 4)) * 8) + local.x)) & 1;
+    color.xyz = value.xxx;
 
-        imageStore(image, texelCoord, color);
-    }
+    imageStore(image, pixel, color);
 }
