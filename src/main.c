@@ -14,8 +14,9 @@
 #include <sys/fcntl.h>
 #include <sys/stat.h>
 
-#define DESC_LAY_CNT 1
 #define MAX_FRAME_NUM 2
+#define INIT_SCREEN_WIDTH 80
+#define INIT_SCREEN_HEIGHT 24
 
 PFN_vkCreateDebugUtilsMessengerEXT vkCreateDebugUtilsMessenger;
 PFN_vkDestroyDebugUtilsMessengerEXT vkDestroyDebugUtilsMessenger;
@@ -85,15 +86,23 @@ typedef struct Context {
     VkPipelineLayout pipeline_lay;
     VkPipeline pipeline;
 
-    VkDescriptorSetLayout desc_lay[DESC_LAY_CNT];
+    VkDescriptorSetLayout desc_lay[MAX_FRAME_NUM];
     VkDescriptorPool desc_pool;
-    VkDescriptorSet desc;
+    VkDescriptorSet desc[MAX_FRAME_NUM];
 
     VkBuffer staging_buf;
     VkDeviceMemory staging_mem;
 
     VkBuffer storage_buf;
     VkDeviceMemory storage_mem;
+
+    // We keep duplicate screen buffers so CPU can write
+    // while GPU is reading the previous state
+    uint32_t screen_width; // In tiles, not pixels
+    uint32_t screen_height;
+    uint32_t *screen;
+    VkBuffer screen_buf;
+    VkDeviceMemory screen_mem;
 
     VkImage storage_img;
     VkImageView storage_img_view;
@@ -424,7 +433,7 @@ void create_compute_pipeline(Arena **arena, Context *ctx) {
         VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
         0,
         0,
-        DESC_LAY_CNT,
+        MAX_FRAME_NUM,
         ctx->desc_lay,
         0,
         0};
@@ -520,9 +529,9 @@ VkBool32 create_img_view(Context *ctx, VkImageView *img_view, VkImage img,
     return vkCreateImageView(ctx->dev, &view_info, 0, img_view);
 }
 
-void create_buf(Context *ctx, VkDeviceSize size, VkBufferUsageFlags use,
-                VkMemoryPropertyFlags props, VkBuffer *buf,
-                VkDeviceMemory *buf_mem) {
+VkDeviceSize create_buf(Context *ctx, VkDeviceSize size, VkBufferUsageFlags use,
+                        VkMemoryPropertyFlags props, VkBuffer *buf,
+                        VkDeviceMemory *buf_mem) {
     [[maybe_unused]] VkBool32 vk_ret = 0;
     VkBufferCreateInfo buf_info = {VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
                                    0,
@@ -549,10 +558,12 @@ void create_buf(Context *ctx, VkDeviceSize size, VkBufferUsageFlags use,
     };
 
     vk_ret = vkAllocateMemory(ctx->dev, &alloc_info, 0, buf_mem);
-    assert(vk_ret == VK_SUCCESS && "Could not alloc Staging Buffer Memory");
+    assert(vk_ret == VK_SUCCESS && "Could not alloc Buffer Memory");
 
     vk_ret = vkBindBufferMemory(ctx->dev, *buf, *buf_mem, 0);
-    assert(vk_ret == VK_SUCCESS && "Could not bind Staging Buffer to Memory");
+    assert(vk_ret == VK_SUCCESS && "Could not bind Buffer to Memory");
+
+    return req.alignment;
 }
 
 void create_swapchain(Arena **arena, Context *ctx) {
@@ -701,7 +712,9 @@ void create_desc(Context *ctx) {
     VkDescriptorSetLayoutBinding desc_lay_binds[] = {
         {0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT,
          0},
-        {1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT,
+        {1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT,
+         0},
+        {2, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT,
          0}};
     uint32_t desc_lay_binds_cnt =
         sizeof(desc_lay_binds) / sizeof(*desc_lay_binds);
@@ -710,14 +723,20 @@ void create_desc(Context *ctx) {
         VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, 0, 0,
         desc_lay_binds_cnt, desc_lay_binds};
 
-    vk_ret =
-        vkCreateDescriptorSetLayout(ctx->dev, &desc_lay_info, 0, ctx->desc_lay);
-    assert(vk_ret == VK_SUCCESS && "Could not create a Descriptor Layout");
-    push_destroyer(ctx, DestroyDescriptorSetLayout, PointerToHandle,
-                   ctx->desc_lay);
+    for (uint32_t i = 0; i < MAX_FRAME_NUM; i++) {
+        vk_ret = vkCreateDescriptorSetLayout(ctx->dev, &desc_lay_info, 0,
+                                             ctx->desc_lay + i);
+        assert(vk_ret == VK_SUCCESS && "Could not create a Descriptor Layout");
+        push_destroyer(ctx, DestroyDescriptorSetLayout, Handle,
+                       ctx->desc_lay[i]);
+    }
 
     VkDescriptorPoolSize desc_pool_sizes[] = {
         {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1},
+        {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1},
+        {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1},
+        {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1},
+        {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1},
         {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1}};
     uint32_t desc_pool_sizes_cnt =
         sizeof(desc_pool_sizes) / sizeof(*desc_pool_sizes);
@@ -726,7 +745,7 @@ void create_desc(Context *ctx) {
         VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
         0,
         0,
-        1,
+        MAX_FRAME_NUM,
         desc_pool_sizes_cnt,
         desc_pool_sizes};
 
@@ -737,9 +756,9 @@ void create_desc(Context *ctx) {
 
     VkDescriptorSetAllocateInfo desc_info = {
         VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO, 0, ctx->desc_pool,
-        DESC_LAY_CNT, ctx->desc_lay};
-    vk_ret = vkAllocateDescriptorSets(ctx->dev, &desc_info, &ctx->desc);
-    assert(vk_ret == VK_SUCCESS && "Could not allocate a Descriptor Set");
+        MAX_FRAME_NUM, ctx->desc_lay};
+    vk_ret = vkAllocateDescriptorSets(ctx->dev, &desc_info, ctx->desc);
+    assert(vk_ret == VK_SUCCESS && "Could not allocate Descriptor Sets");
 }
 
 VkBool32 setup_dbg(Context *ctx) {
@@ -1001,11 +1020,45 @@ void update_desc(Context *ctx, uint32_t storage_size) {
     VkDescriptorBufferInfo desc_storage_info = {ctx->storage_buf, 0,
                                                 storage_size};
 
-    VkWriteDescriptorSet write_descs[] = {
-        {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, 0, ctx->desc, 0, 0, 1,
-         VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 0, &desc_storage_info, 0},
-        {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, 0, ctx->desc, 1, 0, 1,
-         VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, &desc_image_info, 0, 0}};
+    VkWriteDescriptorSet write_descs[MAX_FRAME_NUM * 3];
+    for (uint32_t i = 0; i < MAX_FRAME_NUM; i++) {
+        VkDescriptorBufferInfo desc_screen_info = {
+            ctx->screen_buf, i * ctx->screen_width * ctx->screen_height,
+            ctx->screen_width * ctx->screen_height};
+        write_descs[i * 3] =
+            (VkWriteDescriptorSet){VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                                   0,
+                                   ctx->desc[i],
+                                   0,
+                                   0,
+                                   1,
+                                   VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                                   0,
+                                   &desc_screen_info,
+                                   0};
+        write_descs[i * 3 + 1] =
+            (VkWriteDescriptorSet){VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                                   0,
+                                   ctx->desc[i],
+                                   1,
+                                   0,
+                                   1,
+                                   VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                                   0,
+                                   &desc_storage_info,
+                                   0};
+        write_descs[i * 3 + 2] =
+            (VkWriteDescriptorSet){VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                                   0,
+                                   ctx->desc[i],
+                                   2,
+                                   0,
+                                   1,
+                                   VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+                                   &desc_image_info,
+                                   0,
+                                   0};
+    }
     uint32_t write_descs_cnt = sizeof(write_descs) / sizeof(*write_descs);
 
     vkUpdateDescriptorSets(ctx->dev, write_descs_cnt, write_descs, 0, 0);
@@ -1046,9 +1099,6 @@ void transition_imgs(Arena **arena, Context *ctx, VkCommandBuffer cmd_buf,
 void draw(Arena **arena, Context *ctx) {
     [[maybe_unused]] VkBool32 vk_ret;
     VkCommandBuffer cmd_buf = ctx->cmd_buf[ctx->frame_idx];
-
-    vkWaitForFences(ctx->dev, 1, ctx->fence + ctx->frame_idx, VK_TRUE,
-                    UINT64_MAX);
 
     uint32_t img_idx = UINT32_MAX;
     vk_ret = vkAcquireNextImageKHR(ctx->dev, ctx->swapchain, UINT64_MAX,
@@ -1095,12 +1145,13 @@ void draw(Arena **arena, Context *ctx) {
 
     vkCmdBindPipeline(cmd_buf, VK_PIPELINE_BIND_POINT_COMPUTE, ctx->pipeline);
 
-    VkDescriptorSet descs[] = {ctx->desc};
+    VkDescriptorSet descs[] = {ctx->desc[ctx->frame_idx]};
     uint32_t descs_cnt = sizeof(descs) / sizeof(*descs);
     vkCmdBindDescriptorSets(cmd_buf, VK_PIPELINE_BIND_POINT_COMPUTE,
                             ctx->pipeline_lay, 0, descs_cnt, descs, 0, 0);
 
-    vkCmdDispatch(cmd_buf, 32, 32, 1);
+    // TODO: Probably not the best idea to use width and height
+    vkCmdDispatch(cmd_buf, ctx->screen_width, ctx->screen_height, 1);
 
     transition_imgs(arena, ctx, cmd_buf, all_stages + imgs_cnt,
                     all_stages + imgs_cnt * 2, all_lays + imgs_cnt,
@@ -1108,7 +1159,7 @@ void draw(Arena **arena, Context *ctx) {
 
     VkImageBlit blit = {
         {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
-        {{0, 0, 0}, {32 * 8, 32 * 8, 1}},
+        {{0, 0, 0}, {ctx->screen_width * 8, ctx->screen_height * 8, 1}},
         {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
         {{0, 0, 0}, {ctx->extent.width, ctx->extent.height, 1}},
     };
@@ -1232,7 +1283,7 @@ void setup_img_buf(Context *ctx, VkExtent3D extent) {
     push_destroyer(ctx, DestroyImageView, Handle, ctx->storage_img_view);
 }
 
-void setup_storage(Context *ctx, void *storage, uint32_t storage_size) {
+void setup_fontdata(Context *ctx, void *storage, uint32_t storage_size) {
     [[maybe_unused]] VkBool32 vk_ret = 0;
     create_buf(ctx, storage_size, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
@@ -1270,13 +1321,37 @@ void setup_storage(Context *ctx, void *storage, uint32_t storage_size) {
     push_destroyer(ctx, FreeMemory, Handle, ctx->storage_mem);
 }
 
+void setup_screen(Arena **arena, Context *ctx, uint32_t width,
+                  uint32_t height) {
+    [[maybe_unused]] VkBool32 vk_ret = 0;
+    create_buf(ctx, MAX_FRAME_NUM * width * height * sizeof(uint32_t),
+               VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+               VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                   VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+               &ctx->screen_buf, &ctx->screen_mem);
+
+    vk_ret = vkMapMemory(ctx->dev, ctx->screen_mem, 0,
+                         MAX_FRAME_NUM * width * height * sizeof(uint32_t), 0,
+                         (void *)&ctx->screen);
+    assert(vk_ret == VK_SUCCESS && "Could not map Memory");
+
+    push_destroyer(ctx, DestroyBuffer, Handle, ctx->screen_buf);
+    push_destroyer(ctx, FreeMemory, Handle, ctx->screen_mem);
+    push_destroyer(ctx, UnmapMemory, Handle, ctx->screen_mem);
+
+    ctx->screen_width = width;
+    ctx->screen_height = height;
+}
+
 void setup_bufs(Arena **arena, Context *ctx) {
     FontLUT font = load_font(arena, "unscii-8.bin");
     size_t lett = font_type_to_bytes(font.type);
 
     setup_img_buf(ctx, (VkExtent3D){ctx->extent.width, ctx->extent.height, 1});
 
-    setup_storage(ctx, font.data, lett * 1024);
+    setup_screen(arena, ctx, INIT_SCREEN_WIDTH, INIT_SCREEN_HEIGHT);
+
+    setup_fontdata(ctx, font.data, lett * 1024);
 
     update_desc(ctx, lett * 1024);
 }
@@ -1299,11 +1374,24 @@ int main(void) {
 
     setup_bufs(&arena, &ctx);
 
+    uint32_t chars[80 * 24] = {0};
+
     while (!glfwWindowShouldClose(ctx.window)) {
+        vkWaitForFences(ctx.dev, 1, ctx.fence + ctx.frame_idx, VK_TRUE,
+                        UINT64_MAX);
+
+        memcpy(ctx.screen +
+                   (ctx.screen_width * ctx.screen_height * ctx.frame_idx),
+               chars, sizeof(chars));
+
         draw(&arena, &ctx);
 
         if (ctx.resize_flag) {
             resize(&ctx);
+        }
+
+        for (uint32_t i = 0; i < sizeof(chars) / sizeof(*chars); i++) {
+            chars[i] = i % 128;
         }
 
         glfwWaitEvents();
