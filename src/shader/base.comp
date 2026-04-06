@@ -16,13 +16,12 @@ layout(set = 0, binding = 2) writeonly uniform image2D image;
 void main() {
     ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
     ivec2 local = ivec2(gl_LocalInvocationID.xy);
-
-    vec4 color = vec4(0.0, 0.0, 0.0, 1.0);
+    uint code_idx = gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x;
 
     // By two as every 8x8 char takes up two uints in bits[]
-    uint char_code = codes.codes[gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x] * 2;
+    uint char_code = codes.codes[code_idx] * 2;
     float value = bit_data.bits[char_code + (local.y / 4)] >> (31 - (((3 - (local.y % 4)) * 8) + local.x)) & 1;
-    color.xyz = value.xxx;
+    vec4 color = vec4(value.xxx, 1.0);
 
     imageStore(image, pixel, color);
 }

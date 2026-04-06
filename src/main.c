@@ -100,6 +100,7 @@ typedef struct Context {
     // while GPU is reading the previous state
     uint32_t screen_width; // In tiles, not pixels
     uint32_t screen_height;
+    uint32_t font_size; // standard size of the font
     uint32_t *screen;
     VkBuffer screen_buf;
     VkDeviceMemory screen_mem;
@@ -1023,8 +1024,9 @@ void update_desc(Context *ctx, uint32_t storage_size) {
     VkWriteDescriptorSet write_descs[MAX_FRAME_NUM * 3];
     for (uint32_t i = 0; i < MAX_FRAME_NUM; i++) {
         VkDescriptorBufferInfo desc_screen_info = {
-            ctx->screen_buf, i * ctx->screen_width * ctx->screen_height,
-            ctx->screen_width * ctx->screen_height};
+            ctx->screen_buf,
+            i * ctx->screen_width * ctx->screen_height * sizeof(uint32_t),
+            ctx->screen_width * ctx->screen_height * sizeof(uint32_t)};
         write_descs[i * 3] =
             (VkWriteDescriptorSet){VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
                                    0,
@@ -1159,7 +1161,9 @@ void draw(Arena **arena, Context *ctx) {
 
     VkImageBlit blit = {
         {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
-        {{0, 0, 0}, {ctx->screen_width * 8, ctx->screen_height * 8, 1}},
+        {{0, 0, 0},
+         {ctx->screen_width * ctx->font_size,
+          ctx->screen_height * ctx->font_size, 1}},
         {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
         {{0, 0, 0}, {ctx->extent.width, ctx->extent.height, 1}},
     };
@@ -1345,15 +1349,16 @@ void setup_screen(Arena **arena, Context *ctx, uint32_t width,
 
 void setup_bufs(Arena **arena, Context *ctx) {
     FontLUT font = load_font(arena, "unscii-8.bin");
-    size_t lett = font_type_to_bytes(font.type);
+    ctx->font_size = font_type_to_bytes(font.type);
 
-    setup_img_buf(ctx, (VkExtent3D){ctx->extent.width, ctx->extent.height, 1});
+    setup_img_buf(ctx, (VkExtent3D){INIT_SCREEN_WIDTH * ctx->font_size,
+                                    INIT_SCREEN_HEIGHT * ctx->font_size, 1});
 
     setup_screen(arena, ctx, INIT_SCREEN_WIDTH, INIT_SCREEN_HEIGHT);
 
-    setup_fontdata(ctx, font.data, lett * 1024);
+    setup_fontdata(ctx, font.data, ctx->font_size * 1024);
 
-    update_desc(ctx, lett * 1024);
+    update_desc(ctx, ctx->font_size * 1024);
 }
 
 int main(void) {
@@ -1374,7 +1379,11 @@ int main(void) {
 
     setup_bufs(&arena, &ctx);
 
-    uint32_t chars[80 * 24] = {0};
+    uint32_t chars[INIT_SCREEN_WIDTH * INIT_SCREEN_HEIGHT] = {0};
+
+    for (uint32_t i = 0; i < sizeof(chars) / sizeof(*chars); i++) {
+        chars[i] = i % 1024;
+    }
 
     while (!glfwWindowShouldClose(ctx.window)) {
         vkWaitForFences(ctx.dev, 1, ctx.fence + ctx.frame_idx, VK_TRUE,
@@ -1388,10 +1397,6 @@ int main(void) {
 
         if (ctx.resize_flag) {
             resize(&ctx);
-        }
-
-        for (uint32_t i = 0; i < sizeof(chars) / sizeof(*chars); i++) {
-            chars[i] = i % 128;
         }
 
         glfwWaitEvents();
