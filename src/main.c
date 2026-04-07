@@ -84,7 +84,7 @@ typedef struct Context {
     VkCommandPool cmd_pool;
     VkCommandBuffer cmd_buf[MAX_FRAME_NUM];
     VkPipelineLayout pipeline_lay;
-    VkPipeline pipeline;
+    VkPipeline pipeline[2]; // For different specialized constants
 
     VkDescriptorSetLayout desc_lay[MAX_FRAME_NUM];
     VkDescriptorPool desc_pool;
@@ -100,7 +100,8 @@ typedef struct Context {
     // while GPU is reading the previous state
     uint32_t screen_width; // In tiles, not pixels
     uint32_t screen_height;
-    uint32_t font_size; // standard size of the font
+    uint32_t font_width; // standard size of the font
+    uint32_t font_height;
     uint32_t *screen;
     VkBuffer screen_buf;
     VkDeviceMemory screen_mem;
@@ -423,19 +424,9 @@ VkShaderModule load_shader(Arena **arena, Context *ctx, const char *path) {
     return mod;
 }
 
-void create_compute_pipeline(Arena **arena, Context *ctx) {
+void create_compute_pipelines(Arena **arena, Context *ctx) {
     [[maybe_unused]] VkBool32 ret = 0;
     VkShaderModule compute_shader = load_shader(arena, ctx, "comp.spv");
-
-    VkPipelineShaderStageCreateInfo shader_info = {
-        VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
-        0,
-        0,
-        VK_SHADER_STAGE_COMPUTE_BIT,
-        compute_shader,
-        "main",
-        0,
-    };
 
     VkPipelineLayoutCreateInfo pipeline_lay_info = {
         VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
@@ -451,20 +442,42 @@ void create_compute_pipeline(Arena **arena, Context *ctx) {
     assert(ret == VK_SUCCESS && "Could not create the Pipeline Layout");
     push_destroyer(ctx, DestroyPipelineLayout, Handle, ctx->pipeline_lay);
 
-    VkComputePipelineCreateInfo pipeline_info = {
-        VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
-        0,
-        0,
-        shader_info,
-        ctx->pipeline_lay,
-        0,
-        0,
+    VkSpecializationMapEntry entries[1] = {
+        {0, 0, sizeof(uint32_t)},
     };
+    uint32_t entries_cnt = sizeof(entries) / sizeof(*entries);
 
-    ret = vkCreateComputePipelines(ctx->dev, VK_NULL_HANDLE, 1, &pipeline_info,
-                                   0, &ctx->pipeline);
-    assert(ret == VK_SUCCESS && "Could not create the Graphics Pipeline");
-    push_destroyer(ctx, DestroyPipeline, Handle, ctx->pipeline);
+    uint32_t data[2] = {8, 16};
+
+    for (uint32_t i = 0; i < 2; i++) {
+        VkSpecializationInfo spec_info = {entries_cnt, entries, sizeof(*data),
+                                          data + i};
+
+        VkPipelineShaderStageCreateInfo shader_info = {
+            VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+            0,
+            0,
+            VK_SHADER_STAGE_COMPUTE_BIT,
+            compute_shader,
+            "main",
+            &spec_info,
+        };
+
+        VkComputePipelineCreateInfo pipeline_info = {
+            VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
+            0,
+            0,
+            shader_info,
+            ctx->pipeline_lay,
+            0,
+            0,
+        };
+
+        ret = vkCreateComputePipelines(ctx->dev, VK_NULL_HANDLE, 1,
+                                       &pipeline_info, 0, ctx->pipeline + i);
+        assert(ret == VK_SUCCESS && "Could not create the Graphics Pipeline");
+        push_destroyer(ctx, DestroyPipeline, Handle, ctx->pipeline[i]);
+    }
 
     vkDestroyShaderModule(ctx->dev, compute_shader, 0);
 }
@@ -1002,7 +1015,7 @@ void init_ctx(Arena **arena, Context *ctx) {
 
     create_desc(ctx);
 
-    create_compute_pipeline(arena, ctx);
+    create_compute_pipelines(arena, ctx);
 
     VkFenceCreateInfo fence_info = {
         VK_STRUCTURE_TYPE_FENCE_CREATE_INFO,
@@ -1152,7 +1165,8 @@ void draw(Arena **arena, Context *ctx) {
     transition_imgs(arena, ctx, cmd_buf, all_stages, all_stages + imgs_cnt,
                     all_lays, all_lays + imgs_cnt, imgs, imgs_cnt);
 
-    vkCmdBindPipeline(cmd_buf, VK_PIPELINE_BIND_POINT_COMPUTE, ctx->pipeline);
+    vkCmdBindPipeline(cmd_buf, VK_PIPELINE_BIND_POINT_COMPUTE,
+                      ctx->pipeline[ctx->font_height == 16]);
 
     VkDescriptorSet descs[] = {ctx->desc[ctx->frame_idx]};
     uint32_t descs_cnt = sizeof(descs) / sizeof(*descs);
@@ -1170,8 +1184,8 @@ void draw(Arena **arena, Context *ctx) {
     VkImageBlit blit = {
         {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
         {{0, 0, 0},
-         {ctx->screen_width * ctx->font_size,
-          ctx->screen_height * ctx->font_size, 1}},
+         {ctx->screen_width * ctx->font_width,
+          ctx->screen_height * ctx->font_height, 1}},
         {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
         {{0, 0, 0}, {ctx->extent.width, ctx->extent.height, 1}},
     };
@@ -1356,17 +1370,20 @@ void setup_screen(Arena **arena, Context *ctx, uint32_t width,
 }
 
 void setup_bufs(Arena **arena, Context *ctx) {
-    FontLUT font = load_font(arena, "unscii-8.bin");
-    ctx->font_size = font_type_to_bytes(font.type);
+    FontLUT font = load_font(arena, "unscii-16.bin");
+    // NOTE: Assumes font dimensions
+    uint32_t font_bytes = font_type_to_bytes(font.type);
+    ctx->font_width = font_bytes == 8 ? 8 : font_bytes / 2;
+    ctx->font_height = font_bytes == 32 ? 16 : font_bytes;
 
-    setup_img_buf(ctx, (VkExtent3D){INIT_SCREEN_WIDTH * ctx->font_size,
-                                    INIT_SCREEN_HEIGHT * ctx->font_size, 1});
+    setup_img_buf(ctx, (VkExtent3D){INIT_SCREEN_WIDTH * ctx->font_width,
+                                    INIT_SCREEN_HEIGHT * ctx->font_height, 1});
 
     setup_screen(arena, ctx, INIT_SCREEN_WIDTH, INIT_SCREEN_HEIGHT);
 
-    setup_fontdata(ctx, font.data, ctx->font_size * font.code_cnt);
+    setup_fontdata(ctx, font.data, font_bytes * font.code_cnt);
 
-    update_desc(ctx, ctx->font_size * font.code_cnt);
+    update_desc(ctx, font_bytes * font.code_cnt);
 }
 
 int main(void) {

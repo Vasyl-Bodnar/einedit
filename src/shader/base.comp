@@ -1,7 +1,6 @@
 #version 460
 
-// Fix hardcoded values to font header and constants
-layout (local_size_x = 8, local_size_y = 8) in;
+layout(local_size_x = 8, local_size_y_id = 0) in;
 
 layout(std430, set = 0, binding = 0) readonly buffer Codes {
   uint codes[];
@@ -19,7 +18,7 @@ void main() {
     uint code_idx = gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x;
 
     // By two as every 8x8 char takes up two uints in bits[]
-    uint char_code = codes.codes[code_idx] * 2;
+    uint char_code = codes.codes[code_idx] * (gl_WorkGroupSize.y / 4);
     float value = bit_data.bits[char_code + (local.y / 4)] >> (31 - (((3 - (local.y % 4)) * 8) + local.x)) & 1;
     vec4 color = vec4(value.xxx, 1.0);
 
