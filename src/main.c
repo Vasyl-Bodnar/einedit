@@ -121,6 +121,7 @@ typedef struct Context {
 } Context;
 
 enum font_type {
+    FontMASK = 0x0FFFFFFF,
     FontEnd = 0x30000000,
     FontShort = 0x20000000,
     FontNormal = 0x00000000,
@@ -137,7 +138,8 @@ typedef struct FontSegment {
 // ascii and type are extracted for the fast path
 typedef struct FontLUT {
     enum font_type type; // ascii type (excluding null)
-    size_t segment_cnt;
+    uint32_t segment_cnt;
+    size_t code_cnt;
     FontSegment *segment;
     char *data;
 } FontLUT;
@@ -342,6 +344,7 @@ void empty_destroyer(Context *ctx) {
 
 size_t font_type_to_bytes(enum font_type font_type) {
     switch (font_type) {
+    case FontMASK:
     case FontEnd:
         return 0;
     case FontShort:
@@ -373,13 +376,17 @@ FontLUT load_font(Arena **arena, const char *path) {
     bin += 8;
     font.segment = (void *)bin;
 
-    size_t segments_count = 0;
-    while (font.segment[segments_count].start != FontEnd) {
-        segments_count += 1;
+    uint32_t segments_cnt = 0;
+    size_t code_cnt = 0;
+    while (font.segment[segments_cnt].start != FontEnd) {
+        segments_cnt += 1;
+        code_cnt += font.segment[segments_cnt].end -
+                    (font.segment[segments_cnt].start & FontMASK);
     }
 
-    font.segment_cnt = segments_count;
-    font.data = (void *)(&font.segment[segments_count].end);
+    font.segment_cnt = segments_cnt;
+    font.code_cnt = code_cnt;
+    font.data = (void *)(&font.segment[segments_cnt].end);
 
     // Assume ascii is always represented
     font.type = font.segment[1].start & 0xFF000000;
@@ -484,7 +491,7 @@ VkBool32 begin_cmds_once(Context *ctx, VkCommandBuffer *cmd_buf) {
     [[maybe_unused]] VkBool32 vk_ret;
     VkCommandBufferAllocateInfo info = {
         VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO, 0,
-        ctx->cmd_pool, // Need different pool
+        ctx->cmd_pool, // CONSIDER: different pool
         VK_COMMAND_BUFFER_LEVEL_PRIMARY, 1};
     vk_ret = vkAllocateCommandBuffers(ctx->dev, &info, cmd_buf);
 
@@ -1153,6 +1160,7 @@ void draw(Arena **arena, Context *ctx) {
                             ctx->pipeline_lay, 0, descs_cnt, descs, 0, 0);
 
     // TODO: Probably not the best idea to use width and height
+    // Decouple cells and groups
     vkCmdDispatch(cmd_buf, ctx->screen_width, ctx->screen_height, 1);
 
     transition_imgs(arena, ctx, cmd_buf, all_stages + imgs_cnt,
@@ -1356,9 +1364,9 @@ void setup_bufs(Arena **arena, Context *ctx) {
 
     setup_screen(arena, ctx, INIT_SCREEN_WIDTH, INIT_SCREEN_HEIGHT);
 
-    setup_fontdata(ctx, font.data, ctx->font_size * 1024);
+    setup_fontdata(ctx, font.data, ctx->font_size * font.code_cnt);
 
-    update_desc(ctx, ctx->font_size * 1024);
+    update_desc(ctx, ctx->font_size * font.code_cnt);
 }
 
 int main(void) {
@@ -1382,7 +1390,7 @@ int main(void) {
     uint32_t chars[INIT_SCREEN_WIDTH * INIT_SCREEN_HEIGHT] = {0};
 
     for (uint32_t i = 0; i < sizeof(chars) / sizeof(*chars); i++) {
-        chars[i] = i % 1024;
+        chars[i] = i;
     }
 
     while (!glfwWindowShouldClose(ctx.window)) {
@@ -1402,7 +1410,7 @@ int main(void) {
         glfwWaitEvents();
     }
 
-    // Wait for all work to finish
+    // Wait for all work to finish for cleanup
     vkDeviceWaitIdle(ctx.dev);
 
     empty_destroyer(&ctx);
