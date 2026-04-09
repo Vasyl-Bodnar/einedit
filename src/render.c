@@ -2,6 +2,7 @@
    License, v. 2.0. If a copy of the MPL was not distributed with this
    file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 #include "render.h"
+#include "arena.h"
 
 PFN_vkCreateDebugUtilsMessengerEXT vkCreateDebugUtilsMessenger;
 PFN_vkDestroyDebugUtilsMessengerEXT vkDestroyDebugUtilsMessenger;
@@ -850,13 +851,15 @@ void update_desc(Context *ctx, uint32_t storage_size) {
                                              VK_IMAGE_LAYOUT_GENERAL};
     VkDescriptorBufferInfo desc_storage_info = {ctx->storage_buf, 0,
                                                 storage_size};
+    VkDescriptorBufferInfo desc_screen_info = {
+        ctx->screen_buf,
+        ctx->screen_width * ctx->screen_height * sizeof(uint32_t),
+        ctx->screen_width * ctx->screen_height * sizeof(uint32_t),
+    };
 
     VkWriteDescriptorSet write_descs[MAX_FRAME_NUM * 3];
     for (uint32_t i = 0; i < MAX_FRAME_NUM; i++) {
-        VkDescriptorBufferInfo desc_screen_info = {
-            ctx->screen_buf,
-            i * ctx->screen_width * ctx->screen_height * sizeof(uint32_t),
-            ctx->screen_width * ctx->screen_height * sizeof(uint32_t)};
+        desc_screen_info.offset *= i;
         write_descs[i * 3] =
             (VkWriteDescriptorSet){VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
                                    0,
@@ -1016,8 +1019,7 @@ void setup_fontdata(Context *ctx, void *storage, uint32_t storage_size) {
     push_destroyer(ctx, FreeMemory, Handle, ctx->storage_mem);
 }
 
-void setup_screen(Arena **arena, Context *ctx, uint32_t width,
-                  uint32_t height) {
+void setup_screen(Context *ctx, uint32_t width, uint32_t height) {
     [[maybe_unused]] VkBool32 vk_ret = 0;
     create_buf(ctx, MAX_FRAME_NUM * width * height * sizeof(uint32_t),
                VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
@@ -1039,6 +1041,7 @@ void setup_screen(Arena **arena, Context *ctx, uint32_t width,
 }
 
 void setup_bufs(Arena **arena, Context *ctx) {
+    start_scratch(*arena);
     FontLUT font = load_font(arena, "unscii-8.bin");
     // NOTE: Assumes font dimensions
     uint32_t font_bytes = font_type_to_bytes(font.type);
@@ -1048,13 +1051,15 @@ void setup_bufs(Arena **arena, Context *ctx) {
     setup_img_buf(ctx, (VkExtent3D){INIT_SCREEN_WIDTH * ctx->font_width,
                                     INIT_SCREEN_HEIGHT * ctx->font_height, 1});
 
-    setup_screen(arena, ctx, INIT_SCREEN_WIDTH, INIT_SCREEN_HEIGHT);
+    setup_screen(ctx, INIT_SCREEN_WIDTH, INIT_SCREEN_HEIGHT);
 
     setup_fontdata(ctx, font.data, font_bytes * font.code_cnt);
 
     update_desc(ctx, font_bytes * font.code_cnt);
+    end_scratch(*arena);
 }
 
+// Arena is used for temporary allocs only
 void draw(Arena **arena, Context *ctx) {
     [[maybe_unused]] VkBool32 vk_ret;
     VkCommandBuffer cmd_buf = ctx->cmd_buf[ctx->frame_idx];
@@ -1150,16 +1155,16 @@ void draw(Arena **arena, Context *ctx) {
     VkPipelineStageFlags stage_flags[] = {VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                                           VK_PIPELINE_STAGE_TRANSFER_BIT};
 
-    VkSubmitInfo submit_info = {VK_STRUCTURE_TYPE_SUBMIT_INFO,
-                                0,
-                                img_avails_cnt,
-                                img_avails,
-                                stage_flags,
-                                cmd_bufs_cnt,
-                                cmd_bufs,
-                                rend_dones_cnt,
-                                rend_dones
-
+    VkSubmitInfo submit_info = {
+        VK_STRUCTURE_TYPE_SUBMIT_INFO,
+        0,
+        img_avails_cnt,
+        img_avails,
+        stage_flags,
+        cmd_bufs_cnt,
+        cmd_bufs,
+        rend_dones_cnt,
+        rend_dones,
     };
 
     vk_ret =
@@ -1169,14 +1174,16 @@ void draw(Arena **arena, Context *ctx) {
     VkSwapchainKHR swapchains[] = {ctx->swapchain};
     uint32_t swapchains_cnt = sizeof(swapchains) / sizeof(*swapchains);
 
-    VkPresentInfoKHR present_info = {VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
-                                     0,
-                                     rend_dones_cnt,
-                                     rend_dones,
-                                     swapchains_cnt,
-                                     swapchains,
-                                     &img_idx,
-                                     0};
+    VkPresentInfoKHR present_info = {
+        VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
+        0,
+        rend_dones_cnt,
+        rend_dones,
+        swapchains_cnt,
+        swapchains,
+        &img_idx,
+        0,
+    };
 
     vk_ret = vkQueuePresentKHR(ctx->queue, &present_info);
     switch (vk_ret) {
