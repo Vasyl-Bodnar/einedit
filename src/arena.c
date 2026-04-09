@@ -1,4 +1,5 @@
 #include "arena.h"
+#include <stdio.h>
 
 Arena *create_from(void *space, size_t init_size) {
     Arena *arena = space;
@@ -17,26 +18,51 @@ void *alloc_align(Arena **arena, size_t size, size_t align) {
     assert(align && !(align & (align - 1)) &&
            "Expected power of two alignment");
     Arena *local = *arena;
-    uintptr_t ptr = (uintptr_t)local->space + local->cur + size;
-    if (ptr & (align - 1)) {
-        ptr += align - (ptr & (align - 1));
-    }
+    uintptr_t ptr = (uintptr_t)local->space + local->cur;
+    align = (align - (ptr & (align - 1))) & (align - 1);
+    ptr += align;
+    local->old = local->cur + align;
+    local->cur += size + align;
 
-    if (ptr - (uintptr_t)local->space > local->size) {
+    if (local->cur > local->size) {
         return 0;
     }
 
-    local->cur = ptr - (uintptr_t)local->space;
     return (void *)ptr;
 }
 
-#define alloc(arena, type) alloc_align(arena, sizeof(type), alignof(type))
-#define alloc_arr(arena, n, type)                                              \
-    alloc_align(arena, sizeof(type) * n, alignof(type))
+void *realloc_align(Arena **arena, size_t size, size_t align, void *oldptr) {
+    assert(align && !(align & (align - 1)) &&
+           "Expected power of two alignment");
+    Arena *local = *arena;
+    if (local->old == (((char *)oldptr) - local->space)) {
+        uintptr_t ptr = (uintptr_t)local->space + local->old;
+        align = (align - (ptr & (align - 1))) & (align - 1);
+        ptr += align;
+        local->cur = local->old + size + align;
 
-void start_scratch(Arena *arena) { arena->save = arena->cur; }
-void end_scratch(Arena *arena) { arena->cur = arena->save; }
+        if (local->cur > local->size) {
+            return 0;
+        }
 
-void free_all(Arena *arena) { arena->cur = 0; }
+        return (void *)ptr;
+    } else {
+        return alloc_align(arena, size, align);
+    }
+}
+
+void start_scratch(Arena *arena) {
+    arena->save_cur = arena->cur;
+    arena->save_old = arena->old;
+}
+void end_scratch(Arena *arena) {
+    arena->cur = arena->save_cur;
+    arena->old = arena->save_old;
+}
+
+void free_all(Arena *arena) {
+    arena->cur = 0;
+    arena->old = 0;
+}
 
 void delete_arena(Arena *arena) { free(arena); }

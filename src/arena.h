@@ -8,7 +8,9 @@
 typedef struct Arena {
     size_t size;
     size_t cur;
-    size_t save; // for scratch arena
+    size_t old;
+    size_t save_cur; // for scratch arena
+    size_t save_old;
     char space[];
 } Arena;
 
@@ -21,9 +23,17 @@ Arena *new_arena(size_t init_size);
 // Allocate with a certain alignment
 void *alloc_align(Arena **arena, size_t size, size_t align);
 
+// Resize if possible, else alloc
+void *realloc_align(Arena **arena, size_t new_size, size_t align, void *oldptr);
+
 #define alloc(arena, type) alloc_align(arena, sizeof(type), alignof(type))
 #define alloc_arr(arena, n, type)                                              \
     alloc_align(arena, sizeof(type) * n, alignof(type))
+
+#define realloc(arena, type, ptr)                                              \
+    realloc_align(arena, sizeof(type), alignof(type), ptr)
+#define realloc_arr(arena, n, type, ptr)                                       \
+    realloc_align(arena, sizeof(type) * n, alignof(type), ptr)
 
 // Start temporary, non-overlapping period
 void start_scratch(Arena *arena);
