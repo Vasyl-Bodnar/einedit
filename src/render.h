@@ -20,8 +20,6 @@
 #include "arena.h"
 
 #define MAX_FRAME_NUM 2
-#define INIT_SCREEN_WIDTH 80
-#define INIT_SCREEN_HEIGHT 24
 #define DESTROYER_LIMIT 1000
 
 enum destroy_type {
@@ -148,12 +146,14 @@ typedef struct FontLUT {
     char *data;
 } FontLUT;
 
-void init_ctx(Arena **arena, Context *ctx);
+void init_ctx(Arena **arena, Context *ctx, uint32_t window_width,
+              uint32_t window_height);
 void empty_ctx(Context *ctx);
 
-void setup_bufs(Arena **arena, Context *ctx);
+void setup_bufs(Arena **arena, Context *ctx, const char *font_path,
+                uint32_t width, uint32_t height);
 
-void draw(Arena **arena, Context *ctx);
+void draw(Arena **arena, Context *ctx, uint32_t *chars, uint32_t chars_len);
 void resize(Context *ctx);
 
 #endif // RENDER_H_

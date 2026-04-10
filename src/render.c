@@ -626,7 +626,8 @@ VkBool32 setup_dbg(Context *ctx) {
                                        &ctx->dbg_msger);
 }
 
-void init_ctx(Arena **arena, Context *ctx) {
+void init_ctx(Arena **arena, Context *ctx, uint32_t window_width,
+              uint32_t window_height) {
     [[maybe_unused]] VkBool32 vk_ret = 0;
     [[maybe_unused]] int ret = 0;
 
@@ -707,7 +708,8 @@ void init_ctx(Arena **arena, Context *ctx) {
     push_destroyer(ctx, DestroyDebugUtilsMessenger, Handle, ctx->dbg_msger);
 
     glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
-    ctx->window = glfwCreateWindow(800, 600, "EinEdit", 0, 0);
+    ctx->window =
+        glfwCreateWindow(window_width, window_height, "EinEdit", 0, 0);
     assert(ctx->window && "not create a GLFW Window");
     push_destroyer(ctx, DestroyGLFWWindow, Handle, 0);
 
@@ -1040,18 +1042,19 @@ void setup_screen(Context *ctx, uint32_t width, uint32_t height) {
     ctx->screen_height = height;
 }
 
-void setup_bufs(Arena **arena, Context *ctx) {
+void setup_bufs(Arena **arena, Context *ctx, const char *font_path,
+                uint32_t width, uint32_t height) {
     start_scratch(*arena);
-    FontLUT font = load_font(arena, "unscii-8.bin");
+    FontLUT font = load_font(arena, font_path);
     // NOTE: Assumes font dimensions
     uint32_t font_bytes = font_type_to_bytes(font.type);
     ctx->font_width = font_bytes == 8 ? 8 : font_bytes / 2;
     ctx->font_height = font_bytes == 32 ? 16 : font_bytes;
 
-    setup_img_buf(ctx, (VkExtent3D){INIT_SCREEN_WIDTH * ctx->font_width,
-                                    INIT_SCREEN_HEIGHT * ctx->font_height, 1});
+    setup_img_buf(ctx, (VkExtent3D){width * ctx->font_width,
+                                    height * ctx->font_height, 1});
 
-    setup_screen(ctx, INIT_SCREEN_WIDTH, INIT_SCREEN_HEIGHT);
+    setup_screen(ctx, width, height);
 
     setup_fontdata(ctx, font.data, font_bytes * font.code_cnt);
 
@@ -1060,9 +1063,17 @@ void setup_bufs(Arena **arena, Context *ctx) {
 }
 
 // Arena is used for temporary allocs only
-void draw(Arena **arena, Context *ctx) {
+// Chars is the characters to render on the screen
+void draw(Arena **arena, Context *ctx, uint32_t *chars, uint32_t chars_len) {
     [[maybe_unused]] VkBool32 vk_ret;
     VkCommandBuffer cmd_buf = ctx->cmd_buf[ctx->frame_idx];
+
+    vkWaitForFences(ctx->dev, 1, ctx->fence + ctx->frame_idx, VK_TRUE,
+                    UINT64_MAX);
+
+    memcpy(ctx->screen +
+               (ctx->screen_width * ctx->screen_height * ctx->frame_idx),
+           chars, chars_len);
 
     uint32_t img_idx = UINT32_MAX;
     vk_ret = vkAcquireNextImageKHR(ctx->dev, ctx->swapchain, UINT64_MAX,
