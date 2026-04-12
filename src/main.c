@@ -10,8 +10,8 @@
 #define BLOCK_SIZE (1024 * 1024)
 #define BLOCK_BITSIZE 20
 
-#define INIT_SCREEN_WIDTH 80
-#define INIT_SCREEN_HEIGHT 25
+#define INIT_SCREEN_WIDTH 100
+#define INIT_SCREEN_HEIGHT 30
 
 #define TAB_SIZE 4
 
@@ -40,9 +40,16 @@ typedef struct LineTable {
     Line line[LINE_SIZE];
 } LineTable;
 
+typedef struct Cursor {
+    size_t row;
+    size_t col;
+    uint32_t cur_char;
+} Cursor;
+
 typedef struct Editor {
-    size_t max_line;
-    size_t curr_line;
+    int dirty;
+    Cursor cursor;
+    size_t max_row;
     size_t file_size;
     FILE *file_ptr;
     Block *block_table;
@@ -124,7 +131,7 @@ LineTable *load_line(Arena **arena, Editor *edit, size_t line_id) {
         }
     }
 
-    edit->max_line = line_id * LINE_SIZE + line_idx;
+    edit->max_row = line_id * LINE_SIZE + line_idx;
 
     return edit->line_table;
 }
@@ -166,18 +173,33 @@ void open_editor(Arena **arena, Editor *edit, const char *path) {
 
     edit->file_ptr = file;
     edit->file_size = st.st_size;
+    edit->cursor = (Cursor){0};
+    edit->dirty = 1;
 
     load_line(arena, edit, 0);
 }
 
 void close_editor(Editor *edit) { fclose(edit->file_ptr); }
 
-// Map from a specific line in the file to screen
-void map_to_chars(Arena **arena, Editor *edit, size_t line) {
-    Line line_idx = find_line(arena, edit, line);
+// Convert a cursor position to a screen view
+void update_screen(Arena **arena, Editor *edit) {
+    if (!edit->dirty) {
+        return;
+    }
+
+    Line line_idx;
+    if (edit->cursor.row > (INIT_SCREEN_HEIGHT / 2)) {
+        line_idx =
+            find_line(arena, edit, edit->cursor.row - (INIT_SCREEN_HEIGHT / 2));
+    } else {
+        line_idx = find_line(arena, edit, 0);
+    }
+
     if (!line_idx.live) {
         return;
     }
+
+    edit->dirty = 0;
 
     size_t block_id = line_idx.block_id;
     size_t init_idx = line_idx.idx;
@@ -205,7 +227,7 @@ void map_to_chars(Arena **arena, Editor *edit, size_t line) {
         switch (block[j]) {
         case '\t':
             for (size_t tmp = i;
-                 i < tmp + TAB_SIZE ||
+                 i < tmp + TAB_SIZE &&
                  i < tmp + (INIT_SCREEN_WIDTH - (tmp % INIT_SCREEN_WIDTH));
                  i++) {
                 edit->screen[i] = 0;
@@ -223,6 +245,17 @@ void map_to_chars(Arena **arena, Editor *edit, size_t line) {
             break;
         }
     }
+
+    const size_t half_screen = (INIT_SCREEN_HEIGHT / 2);
+    size_t idx =
+        ((edit->cursor.row > half_screen) ? half_screen : edit->cursor.row) *
+            INIT_SCREEN_WIDTH +
+        edit->cursor.col;
+
+    // Full Block █ char
+    // NOTE: These are indexed by their line in the hex instead of unicode.
+    // My font format does have ranges but they are not supported yet
+    edit->screen[idx] = 1415;
 }
 
 void glfw_err_cb(int error, const char *desc) {
@@ -234,18 +267,60 @@ void glfw_scroll_cb(GLFWwindow *window, double xoffset, double yoffset) {
     Editor *edit = ((Editor **)user)[0];
 
     if (yoffset < 0) {
-        edit->curr_line += (size_t)(yoffset / -0.50);
-        if (edit->curr_line > edit->max_line) {
-            edit->curr_line = edit->max_line;
+        edit->cursor.row += (size_t)(yoffset / -0.50);
+        if (edit->cursor.row > edit->max_row) {
+            edit->cursor.row = edit->max_row;
+        } else {
+            edit->dirty = 1;
         }
     }
 
     if (yoffset > 0) {
         size_t tmp = (size_t)(yoffset / 0.50);
-        if (edit->curr_line < tmp) {
-            edit->curr_line = 0;
+        if (edit->cursor.row < tmp) {
+            edit->cursor.row = 0;
         } else {
-            edit->curr_line -= tmp;
+            edit->cursor.row -= tmp;
+            edit->dirty = 1;
+        }
+    }
+}
+
+// TODO: Proper key navigation
+void glfw_key_cb(GLFWwindow *window, int key, int scancode, int action,
+                 int mods) {
+    void *user = glfwGetWindowUserPointer(window);
+    Editor *edit = ((Editor **)user)[0];
+
+    if (key == GLFW_KEY_J && action != GLFW_RELEASE) {
+        edit->cursor.row += 1;
+        if (edit->cursor.row > edit->max_row) {
+            edit->cursor.row = edit->max_row;
+        } else {
+            edit->dirty = 1;
+        }
+    }
+
+    if (key == GLFW_KEY_K && action != GLFW_RELEASE) {
+        if (edit->cursor.row) {
+            edit->cursor.row -= 1;
+            edit->dirty = 1;
+        }
+    }
+
+    if (key == GLFW_KEY_L && action != GLFW_RELEASE) {
+        edit->cursor.col += 1;
+        if (edit->cursor.col > INIT_SCREEN_WIDTH) {
+            edit->cursor.col = INIT_SCREEN_WIDTH;
+        } else {
+            edit->dirty = 1;
+        }
+    }
+
+    if (key == GLFW_KEY_H && action != GLFW_RELEASE) {
+        if (edit->cursor.col) {
+            edit->cursor.col -= 1;
+            edit->dirty = 1;
         }
     }
 }
@@ -271,17 +346,18 @@ int main(int argc, char *argv[]) {
     glfwSetWindowUserPointer(ctx.window, user);
 
     glfwSetScrollCallback(ctx.window, glfw_scroll_cb);
+    glfwSetKeyCallback(ctx.window, glfw_key_cb);
 
     setup_bufs(&arena, &ctx, "unscii-8.bin", INIT_SCREEN_WIDTH,
                INIT_SCREEN_HEIGHT);
 
     open_editor(&arena, &edit, "../buildlib.scm");
-    map_to_chars(&arena, &edit, edit.curr_line);
+    update_screen(&arena, &edit);
 
     while (!glfwWindowShouldClose(ctx.window)) {
         draw(&arena, &ctx, edit.screen, sizeof(edit.screen));
 
-        map_to_chars(&arena, &edit, edit.curr_line);
+        update_screen(&arena, &edit);
 
         if (ctx.resize_flag) {
             resize(&ctx);
