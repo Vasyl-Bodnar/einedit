@@ -1,6 +1,7 @@
 #include "arena.h"
 #include <stdio.h>
 
+// TODO: How about expanding as necessary
 Arena *create_from(void *space, size_t init_size) {
     Arena *arena = space;
     assert(arena && init_size >= sizeof(*arena) && "Could not create an Arena");
@@ -47,7 +48,11 @@ void *realloc_align(Arena **arena, size_t size, size_t align, void *oldptr) {
 
         return (void *)ptr;
     } else {
-        return alloc_align(arena, size, align);
+        void *new = alloc_align(arena, size, align);
+        // FIXME: This copies further than what the oldptr should have
+        // if oldsize < size
+        memcpy(new, oldptr, size);
+        return new;
     }
 }
 

@@ -187,6 +187,7 @@ void update_screen(Arena **arena, Editor *edit) {
         return;
     }
 
+    // TODO: First line is a little wonky when we are crossing this threshold
     Line line_idx;
     if (edit->cursor.row > (INIT_SCREEN_HEIGHT / 2)) {
         line_idx =
@@ -263,11 +264,11 @@ void glfw_err_cb(int error, const char *desc) {
 }
 
 void glfw_scroll_cb(GLFWwindow *window, double xoffset, double yoffset) {
-    void *user = glfwGetWindowUserPointer(window);
-    Editor *edit = ((Editor **)user)[0];
+    Editor *edit = (Editor *)glfwGetWindowUserPointer(window);
 
+    // Could work a bit more on this to make it smoother
     if (yoffset < 0) {
-        edit->cursor.row += (size_t)(yoffset / -0.50);
+        edit->cursor.row += 1;
         if (edit->cursor.row > edit->max_row) {
             edit->cursor.row = edit->max_row;
         } else {
@@ -276,21 +277,17 @@ void glfw_scroll_cb(GLFWwindow *window, double xoffset, double yoffset) {
     }
 
     if (yoffset > 0) {
-        size_t tmp = (size_t)(yoffset / 0.50);
-        if (edit->cursor.row < tmp) {
-            edit->cursor.row = 0;
-        } else {
-            edit->cursor.row -= tmp;
+        if (edit->cursor.row) {
+            edit->cursor.row -= 1;
             edit->dirty = 1;
         }
     }
 }
 
-// TODO: Proper key navigation
+// TODO: Proper key combo navigation
 void glfw_key_cb(GLFWwindow *window, int key, int scancode, int action,
                  int mods) {
-    void *user = glfwGetWindowUserPointer(window);
-    Editor *edit = ((Editor **)user)[0];
+    Editor *edit = (Editor *)glfwGetWindowUserPointer(window);
 
     if (key == GLFW_KEY_J && action != GLFW_RELEASE) {
         edit->cursor.row += 1;
@@ -326,14 +323,17 @@ void glfw_key_cb(GLFWwindow *window, int key, int scancode, int action,
 }
 
 int main(int argc, char *argv[]) {
-    assert(argc < 2 && "Need a file path argument");
+    if (argc < 2) {
+        printf("Need a file to read in the arguments!\n");
+        return -1;
+    }
 
     // A bit much, we might not need all of it, or might even need more
     // For now, just keep it for current testing/developing
     // TODO: Make more dynamic
     Arena *arena = new_arena(1024 * 1024 * 4);
     Editor edit = {0};
-    Context ctx;
+    Context ctx = {0};
 
     if (!glfwInit()) {
         assert(!"GLFW did not init");
@@ -342,8 +342,7 @@ int main(int argc, char *argv[]) {
 
     init_ctx(&arena, &ctx, 1600, 800);
 
-    void *user[] = {&edit};
-    glfwSetWindowUserPointer(ctx.window, user);
+    glfwSetWindowUserPointer(ctx.window, &edit);
 
     glfwSetScrollCallback(ctx.window, glfw_scroll_cb);
     glfwSetKeyCallback(ctx.window, glfw_key_cb);
@@ -351,7 +350,7 @@ int main(int argc, char *argv[]) {
     setup_bufs(&arena, &ctx, "unscii-8.bin", INIT_SCREEN_WIDTH,
                INIT_SCREEN_HEIGHT);
 
-    open_editor(&arena, &edit, "../buildlib.scm");
+    open_editor(&arena, &edit, argv[1]);
     update_screen(&arena, &edit);
 
     while (!glfwWindowShouldClose(ctx.window)) {
