@@ -3,9 +3,10 @@
    file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 #include "arena.h"
 #include "render.h"
+#include <GLFW/glfw3.h>
 
 #define LINE_SIZE (32 * 1024)
-// NOTE: BLOCK_BITSIZE MUST be log2(BLOCK_SIZE)
+// NOTE: BLOCK_BITSIZE MUST be log2(BLOCK_SIZE) or more
 #define BLOCK_SIZE (1024 * 1024)
 #define BLOCK_BITSIZE 20
 
@@ -40,6 +41,8 @@ typedef struct LineTable {
 } LineTable;
 
 typedef struct Editor {
+    size_t max_line;
+    size_t curr_line;
     size_t file_size;
     FILE *file_ptr;
     Block *block_table;
@@ -47,7 +50,7 @@ typedef struct Editor {
     uint32_t screen[INIT_SCREEN_WIDTH * INIT_SCREEN_HEIGHT];
 } Editor;
 
-// NOTE: Assume the block is not already loaded
+// NOTE: Assumes the block is not already loaded
 Block *load_block(Arena **arena, Editor *edit, size_t block_id) {
     [[maybe_unused]] size_t res;
 
@@ -121,11 +124,13 @@ LineTable *load_line(Arena **arena, Editor *edit, size_t line_id) {
         }
     }
 
+    edit->max_line = line_id * LINE_SIZE + line_idx;
+
     return edit->line_table;
 }
 
 Line find_line(Arena **arena, Editor *edit, size_t line) {
-    if (line > edit->file_size) {
+    if (line >= edit->file_size) {
         return (Line){0};
     }
 
@@ -133,6 +138,7 @@ Line find_line(Arena **arena, Editor *edit, size_t line) {
         return (Line){.block_id = 0, .idx = 0, .live = 1};
     }
 
+    // First line is implied
     line -= 1;
 
     size_t target_id = line / LINE_SIZE;
@@ -178,10 +184,22 @@ void map_to_chars(Arena **arena, Editor *edit, size_t line) {
     char *block = find_block(arena, edit, block_id)->ptr;
     for (size_t i = 0, j = init_idx; i < INIT_SCREEN_WIDTH * INIT_SCREEN_HEIGHT;
          j++) {
-        if (j >= BLOCK_SIZE) {
+        if (j * block_id > edit->file_size) {
+            for (; i < INIT_SCREEN_WIDTH * INIT_SCREEN_HEIGHT; i++) {
+                edit->screen[i] = 0;
+            }
+            return;
+        } else if (j >= BLOCK_SIZE) {
             j = 0;
             block_id += 1;
-            block = find_block(arena, edit, block_id)->ptr;
+            Block *bl = find_block(arena, edit, block_id);
+            if (!bl) {
+                for (; i < INIT_SCREEN_WIDTH * INIT_SCREEN_HEIGHT; i++) {
+                    edit->screen[i] = 0;
+                }
+                return;
+            }
+            block = bl->ptr;
         }
 
         switch (block[j]) {
@@ -211,13 +229,35 @@ void glfw_err_cb(int error, const char *desc) {
     fprintf(stderr, "GLFW Error: %s\n", desc);
 }
 
+void glfw_scroll_cb(GLFWwindow *window, double xoffset, double yoffset) {
+    void *user = glfwGetWindowUserPointer(window);
+    Editor *edit = ((Editor **)user)[0];
+
+    if (yoffset < 0) {
+        edit->curr_line += (size_t)(yoffset / -0.50);
+        if (edit->curr_line > edit->max_line) {
+            edit->curr_line = edit->max_line;
+        }
+    }
+
+    if (yoffset > 0) {
+        size_t tmp = (size_t)(yoffset / 0.50);
+        if (edit->curr_line < tmp) {
+            edit->curr_line = 0;
+        } else {
+            edit->curr_line -= tmp;
+        }
+    }
+}
+
 int main(int argc, char *argv[]) {
     assert(argc < 2 && "Need a file path argument");
 
     // A bit much, we might not need all of it, or might even need more
     // For now, just keep it for current testing/developing
+    // TODO: Make more dynamic
     Arena *arena = new_arena(1024 * 1024 * 4);
-    Editor edit;
+    Editor edit = {0};
     Context ctx;
 
     if (!glfwInit()) {
@@ -227,24 +267,27 @@ int main(int argc, char *argv[]) {
 
     init_ctx(&arena, &ctx, 1600, 800);
 
+    void *user[] = {&edit};
+    glfwSetWindowUserPointer(ctx.window, user);
+
+    glfwSetScrollCallback(ctx.window, glfw_scroll_cb);
+
     setup_bufs(&arena, &ctx, "unscii-8.bin", INIT_SCREEN_WIDTH,
                INIT_SCREEN_HEIGHT);
 
     open_editor(&arena, &edit, "../buildlib.scm");
-    map_to_chars(&arena, &edit, 0);
+    map_to_chars(&arena, &edit, edit.curr_line);
 
     while (!glfwWindowShouldClose(ctx.window)) {
         draw(&arena, &ctx, edit.screen, sizeof(edit.screen));
 
-        if (ctx.frame_cnt % 5 == 0) {
-            map_to_chars(&arena, &edit, ctx.frame_cnt % 200);
-        }
+        map_to_chars(&arena, &edit, edit.curr_line);
 
         if (ctx.resize_flag) {
             resize(&ctx);
         }
 
-        glfwWaitEvents();
+        glfwPollEvents();
     }
 
     // Wait for all work to finish for cleanup
