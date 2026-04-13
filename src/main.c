@@ -43,7 +43,6 @@ typedef struct LineTable {
 typedef struct Cursor {
     size_t row;
     size_t col;
-    uint32_t cur_char;
 } Cursor;
 
 typedef struct Editor {
@@ -95,19 +94,25 @@ Block *find_block(Arena **arena, Editor *edit, size_t block_id) {
 
 // Gets a line table from the block(s)
 // TODO: Loading the all blocks up to this line_id, not ideal
+// TODO: Currently this practically assumes there is one line table
 LineTable *load_line(Arena **arena, Editor *edit, size_t line_id) {
     LineTable *line_tab = edit->line_table;
     edit->line_table = alloc(arena, LineTable);
     edit->line_table->line_id = line_id;
     edit->line_table->next = line_tab;
 
-    size_t line_idx = 0;
+    // First line is assumed and does not have a physical \n
+    edit->line_table->line[0].block_id = 0;
+    edit->line_table->line[0].idx = 0;
+    edit->line_table->line[0].live = 1;
+
+    size_t line_idx = 1;
     for (size_t i = 0; i < edit->file_size / BLOCK_SIZE; i++) {
         Block *block = find_block(arena, edit, i);
         for (size_t j = 0; j < BLOCK_SIZE; j++) {
             if (block->ptr[j] == '\n') {
                 edit->line_table->line[line_idx].block_id = i;
-                edit->line_table->line[line_idx].idx = j;
+                edit->line_table->line[line_idx].idx = j + 1;
                 edit->line_table->line[line_idx].live = 1;
                 line_idx += 1;
                 if (line_idx == LINE_SIZE) {
@@ -122,7 +127,7 @@ LineTable *load_line(Arena **arena, Editor *edit, size_t line_id) {
         if (block->ptr[j] == '\n') {
             edit->line_table->line[line_idx].block_id =
                 edit->file_size / BLOCK_SIZE;
-            edit->line_table->line[line_idx].idx = j;
+            edit->line_table->line[line_idx].idx = j + 1;
             edit->line_table->line[line_idx].live = 1;
             line_idx += 1;
             if (line_idx == LINE_SIZE) {
@@ -144,9 +149,6 @@ Line find_line(Arena **arena, Editor *edit, size_t line) {
     if (!line) {
         return (Line){.block_id = 0, .idx = 0, .live = 1};
     }
-
-    // First line is implied
-    line -= 1;
 
     size_t target_id = line / LINE_SIZE;
     size_t target_idx = line % LINE_SIZE;
@@ -187,14 +189,16 @@ void update_screen(Arena **arena, Editor *edit) {
         return;
     }
 
-    // TODO: First line is a little wonky when we are crossing this threshold
     Line line_idx;
-    if (edit->cursor.row > (INIT_SCREEN_HEIGHT / 2)) {
+    if (edit->cursor.row > (INIT_SCREEN_HEIGHT / 2) - 1) {
         line_idx =
             find_line(arena, edit, edit->cursor.row - (INIT_SCREEN_HEIGHT / 2));
     } else {
         line_idx = find_line(arena, edit, 0);
     }
+
+    printf("(cursor %zu:%zu) (line-idx %d:%d)\n", edit->cursor.row,
+           edit->cursor.col, line_idx.block_id, line_idx.idx);
 
     if (!line_idx.live) {
         return;
@@ -268,10 +272,8 @@ void glfw_scroll_cb(GLFWwindow *window, double xoffset, double yoffset) {
 
     // Could work a bit more on this to make it smoother
     if (yoffset < 0) {
-        edit->cursor.row += 1;
-        if (edit->cursor.row > edit->max_row) {
-            edit->cursor.row = edit->max_row;
-        } else {
+        if (edit->cursor.row < edit->max_row) {
+            edit->cursor.row += 1;
             edit->dirty = 1;
         }
     }
@@ -279,6 +281,20 @@ void glfw_scroll_cb(GLFWwindow *window, double xoffset, double yoffset) {
     if (yoffset > 0) {
         if (edit->cursor.row) {
             edit->cursor.row -= 1;
+            edit->dirty = 1;
+        }
+    }
+
+    if (xoffset < 0) {
+        if (edit->cursor.col < INIT_SCREEN_WIDTH - 1) {
+            edit->cursor.col += 1;
+            edit->dirty = 1;
+        }
+    }
+
+    if (xoffset > 0) {
+        if (edit->cursor.col) {
+            edit->cursor.col -= 1;
             edit->dirty = 1;
         }
     }
@@ -290,10 +306,8 @@ void glfw_key_cb(GLFWwindow *window, int key, int scancode, int action,
     Editor *edit = (Editor *)glfwGetWindowUserPointer(window);
 
     if (key == GLFW_KEY_J && action != GLFW_RELEASE) {
-        edit->cursor.row += 1;
-        if (edit->cursor.row > edit->max_row) {
-            edit->cursor.row = edit->max_row;
-        } else {
+        if (edit->cursor.row < edit->max_row) {
+            edit->cursor.row += 1;
             edit->dirty = 1;
         }
     }
@@ -306,10 +320,8 @@ void glfw_key_cb(GLFWwindow *window, int key, int scancode, int action,
     }
 
     if (key == GLFW_KEY_L && action != GLFW_RELEASE) {
-        edit->cursor.col += 1;
-        if (edit->cursor.col > INIT_SCREEN_WIDTH) {
-            edit->cursor.col = INIT_SCREEN_WIDTH;
-        } else {
+        if (edit->cursor.col < INIT_SCREEN_WIDTH - 1) {
+            edit->cursor.col += 1;
             edit->dirty = 1;
         }
     }
@@ -323,6 +335,8 @@ void glfw_key_cb(GLFWwindow *window, int key, int scancode, int action,
 }
 
 int main(int argc, char *argv[]) {
+    // TODO: Create a default file in memory
+    char *file_path = argv[1];
     if (argc < 2) {
         printf("Need a file to read in the arguments!\n");
         return -1;
@@ -350,7 +364,7 @@ int main(int argc, char *argv[]) {
     setup_bufs(&arena, &ctx, "unscii-8.bin", INIT_SCREEN_WIDTH,
                INIT_SCREEN_HEIGHT);
 
-    open_editor(&arena, &edit, argv[1]);
+    open_editor(&arena, &edit, file_path);
     update_screen(&arena, &edit);
 
     while (!glfwWindowShouldClose(ctx.window)) {
