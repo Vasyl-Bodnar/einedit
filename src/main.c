@@ -64,7 +64,7 @@ typedef struct Editor {
 Block *load_block(Arena **arena, Editor *edit, size_t block_id) {
     [[maybe_unused]] size_t res;
 
-    assert(edit->max_block_cnt < edit->block_cnt &&
+    assert(edit->max_block_cnt > edit->block_cnt &&
            "TODO: Setup a bit of garbage collection for blocks");
 
     Block *block_tab = edit->block_table;
@@ -191,9 +191,6 @@ void open_editor(Arena **arena, Editor *edit, const char *path) {
     edit->cursor = (Cursor){0};
     edit->dirty = 1;
 
-    edit->ledger = alloc_align(
-        arena, sizeof(Ledger) + sizeof(*edit->ledger->ptr) * edit->ledger_size,
-        alignof(Ledger));
     load_line(arena, edit, 0);
 }
 
@@ -348,10 +345,7 @@ int main(int argc, char *argv[]) {
         return -1;
     }
 
-    // A bit much, we might not need all of it, or might even need more
-    // For now, just keep it for current testing/developing
-    // TODO: Make more dynamic
-    Arena *arena = new_arena(1024 * 1024 * 4);
+    Arena *arena = new_arena(1024 * 1024 * 4, 1024 * 1024 * 64);
     Editor edit = {
         .max_block_cnt = DEFAULT_MAX_BLOCK_CNT,
         .block_size = DEFAULT_BLOCK_SIZE,

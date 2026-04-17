@@ -7,33 +7,27 @@
 
 typedef struct Arena {
     size_t size;
+    size_t max_size;
     size_t cur;
     size_t old;
-    size_t save_cur; // for scratch arena
+    size_t save_cur; // for scratch arena // TODO: Probably just sublet instead
     size_t save_old;
+    struct Arena *next;
     char space[];
 } Arena;
 
 // No need to delete, you manage space yourself
-Arena *create_from(void *space, size_t init_size);
+Arena *create_from(void *space, size_t init_size, size_t max_size);
 
 // Requires correspanding delete
-Arena *new_arena(size_t init_size);
+Arena *new_arena(size_t init_size, size_t max_size);
 
 // Allocate with a certain alignment
 void *alloc_align(Arena **arena, size_t size, size_t align);
 
-// Resize if possible, else alloc
-void *realloc_align(Arena **arena, size_t new_size, size_t align, void *oldptr);
-
 #define alloc(arena, type) alloc_align(arena, sizeof(type), alignof(type))
 #define alloc_arr(arena, n, type)                                              \
     alloc_align(arena, sizeof(type) * n, alignof(type))
-
-#define realloc(arena, type, ptr)                                              \
-    realloc_align(arena, sizeof(type), alignof(type), ptr)
-#define realloc_arr(arena, n, type, ptr)                                       \
-    realloc_align(arena, sizeof(type) * n, alignof(type), ptr)
 
 // Start temporary, non-overlapping period
 void start_scratch(Arena *arena);
