@@ -4,7 +4,6 @@
 
 Arena *create_from(void *space, size_t init_size, size_t max_size) {
     Arena *arena = space;
-    printf("%zu %zu\n", max_size, init_size);
     assert(arena && init_size >= sizeof(*arena) &&
            (!max_size || max_size >= init_size) && "Could not create an Arena");
     memset(arena, 0, init_size);
