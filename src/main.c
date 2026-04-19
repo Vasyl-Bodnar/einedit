@@ -40,9 +40,13 @@ typedef struct Cursor {
     size_t col;
 } Cursor;
 
+// Key combo is a state machine
+enum key_state { KeyStateNone = 0, KeyStateGo };
+
 typedef struct Editor {
     int dirty;
     Cursor cursor;
+    enum key_state key_state;
     size_t max_row;
 
     size_t file_size;
@@ -314,26 +318,64 @@ void glfw_key_cb(GLFWwindow *window, int key, int scancode, int action,
                  int mods) {
     Editor *edit = (Editor *)glfwGetWindowUserPointer(window);
 
-    if (key == GLFW_KEY_J && action != GLFW_RELEASE) {
-        if (edit->cursor.row < edit->max_row) {
-            edit->cursor.row += 1;
-            edit->dirty = 1;
+    switch (edit->key_state) {
+    case KeyStateNone:
+        switch (key) {
+        case GLFW_KEY_J:
+            if (action != GLFW_RELEASE && edit->cursor.row < edit->max_row) {
+                edit->cursor.row += 1;
+                edit->dirty = 1;
+            }
+            break;
+        case GLFW_KEY_K:
+            if (action != GLFW_RELEASE && edit->cursor.row) {
+                edit->cursor.row -= 1;
+                edit->dirty = 1;
+            }
+            break;
+        case GLFW_KEY_L:
+            if (action != GLFW_RELEASE &&
+                edit->cursor.col < INIT_SCREEN_WIDTH - 1) {
+                edit->cursor.col += 1;
+                edit->dirty = 1;
+            }
+            break;
+        case GLFW_KEY_H:
+            if (action != GLFW_RELEASE && edit->cursor.col) {
+                edit->cursor.col -= 1;
+                edit->dirty = 1;
+            }
+            break;
+        case GLFW_KEY_G:
+            if (action != GLFW_RELEASE) {
+                if (mods == GLFW_MOD_SHIFT) {
+                    edit->cursor.row = edit->max_row ? edit->max_row - 1 : 0;
+                    edit->cursor.col = 0;
+                    edit->dirty = 1;
+                } else {
+                    edit->key_state = KeyStateGo;
+                }
+            }
+            break;
+        default:
+            break;
         }
-    } else if (key == GLFW_KEY_K && action != GLFW_RELEASE) {
-        if (edit->cursor.row) {
-            edit->cursor.row -= 1;
-            edit->dirty = 1;
+        break;
+    case KeyStateGo:
+        switch (key) {
+        case GLFW_KEY_G:
+            if (action != GLFW_RELEASE) {
+                edit->cursor.row = 0;
+                edit->cursor.col = 0;
+                edit->dirty = 1;
+
+                edit->key_state = KeyStateNone;
+            }
+            break;
+        default:
+            break;
         }
-    } else if (key == GLFW_KEY_L && action != GLFW_RELEASE) {
-        if (edit->cursor.col < INIT_SCREEN_WIDTH - 1) {
-            edit->cursor.col += 1;
-            edit->dirty = 1;
-        }
-    } else if (key == GLFW_KEY_H && action != GLFW_RELEASE) {
-        if (edit->cursor.col) {
-            edit->cursor.col -= 1;
-            edit->dirty = 1;
-        }
+        break;
     }
 }
 
