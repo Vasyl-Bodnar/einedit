@@ -7,18 +7,29 @@
 
 // Default sizes and limits
 #define DEFAULT_LINE_SIZE (32 * 1024)
+#define DEFAULT_SMALL_BLOCK_SIZE (4 * 1024)
 #define DEFAULT_BLOCK_SIZE (1024 * 1024)
-#define DEFAULT_MAX_BLOCK_CNT 1024
+#define DEFAULT_MAX_BLOCK_CNT (2 * 1024)
 
 #define INIT_SCREEN_WIDTH 100
 #define INIT_SCREEN_HEIGHT 30
 
 #define TAB_SIZE 4
 
+enum block_kind {
+    Raw = 0,
+    ModAdd,
+    ModRemove,
+};
+
 typedef struct Block {
-    size_t block_id;
+    enum block_kind kind;
+    size_t size;   // for mods, max is editor->block_size
+    size_t offset; // for mods
+    size_t id;
     struct Block *next;
-    char ptr[]; // From editor->block_size
+    struct Block *mods;
+    char ptr[]; // From editor->block_size usually
 } Block;
 
 // NOTE: Some space potentially available here at a limit to id/idx
@@ -41,7 +52,12 @@ typedef struct Cursor {
 } Cursor;
 
 // Key combo is a state machine
-enum key_state { KeyStateNone = 0, KeyStateGo };
+enum key_state {
+    KeyStateNone = 0,
+    KeyStateStartInput,
+    KeyStateInput,
+    KeyStateGo,
+};
 
 typedef struct Editor {
     int dirty;
@@ -52,6 +68,7 @@ typedef struct Editor {
     size_t file_size;
     FILE *file_ptr;
 
+    const size_t small_block_size;
     const size_t block_size;
     const size_t max_block_cnt;
     size_t block_cnt;
@@ -76,7 +93,7 @@ Block *load_block(Arena **arena, Editor *edit, size_t block_id) {
         arena,
         sizeof(Block) + sizeof(*edit->block_table->ptr) * edit->block_size,
         alignof(Block));
-    edit->block_table->block_id = block_id;
+    edit->block_table->id = block_id;
     edit->block_table->next = block_tab;
     edit->block_cnt += 1;
 
@@ -97,7 +114,7 @@ Block *find_block(Arena **arena, Editor *edit, size_t block_id) {
 
     Block *block_tab = edit->block_table;
     while (block_tab) {
-        if (block_tab->block_id == block_id) {
+        if (block_tab->id == block_id) {
             return block_tab;
         }
         block_tab = block_tab->next;
@@ -213,7 +230,6 @@ void update_screen(Arena **arena, Editor *edit) {
     } else {
         line_idx = find_line(arena, edit, 0);
     }
-
     if (!line_idx.live) {
         return;
     }
@@ -282,7 +298,8 @@ void glfw_err_cb(int error, const char *desc) {
 }
 
 void glfw_scroll_cb(GLFWwindow *window, double xoffset, double yoffset) {
-    Editor *edit = (Editor *)glfwGetWindowUserPointer(window);
+    Editor *edit = ((Editor **)glfwGetWindowUserPointer(window))[0];
+    // Arena **arena = ((Arena ***)glfwGetWindowUserPointer(window))[1];
 
     // Could work a bit more on this to make it smoother
     if (yoffset < 0) {
@@ -314,9 +331,65 @@ void glfw_scroll_cb(GLFWwindow *window, double xoffset, double yoffset) {
     }
 }
 
+// TODO: This feels suboptimal and should probably not be in here
+void glfw_char_cb(GLFWwindow *window, unsigned int code) {
+    Editor *edit = ((Editor **)glfwGetWindowUserPointer(window))[0];
+    Arena **arena = ((Arena ***)glfwGetWindowUserPointer(window))[1];
+
+    if (edit->key_state == KeyStateStartInput) {
+        edit->key_state = KeyStateInput;
+        return;
+    }
+
+    if (edit->key_state == KeyStateInput) {
+        Line line = find_line(arena, edit, edit->cursor.row);
+
+        if (!line.live) {
+            return;
+        }
+
+        Block *block = find_block(arena, edit, line.block_id);
+        if (!block) {
+            // TODO: Possibly EOF, should create a new block here then
+            return;
+        }
+
+        // FIXME: This idx is correct up to the new line, afterwards it
+        // overwrites parts of the next line
+        size_t idx = line.idx + edit->cursor.col;
+        Block *mods = block->mods;
+        while (mods) {
+            if (idx >= mods->offset &&
+                edit->small_block_size > (idx - mods->offset)) {
+                // FIXME: This converts 4 byte int to 1 byte char
+                mods->ptr[idx] = code;
+                printf("Added a char %c to %zu %d\n", code, idx, line.block_id);
+                return;
+            }
+            mods = mods->next;
+        }
+
+        mods = block->mods;
+        block->mods =
+            alloc_align(arena,
+                        sizeof(Block) + sizeof(*edit->block_table->ptr) *
+                                            edit->small_block_size,
+                        alignof(Block));
+        block->mods->kind = ModAdd;
+        block->mods->id = block->id;
+        block->mods->size = 1;
+        block->mods->offset = idx;
+        block->mods->next = mods;
+        // FIXME: This converts 4 byte int to 1 byte char
+        block->mods->ptr[idx] = code;
+        printf("Added a char %c to NEW %zu %d\n", code, idx, line.block_id);
+    }
+}
+
 void glfw_key_cb(GLFWwindow *window, int key, int scancode, int action,
                  int mods) {
-    Editor *edit = (Editor *)glfwGetWindowUserPointer(window);
+    Editor *edit = ((Editor **)glfwGetWindowUserPointer(window))[0];
+    // Arena **arena = ((Arena ***)glfwGetWindowUserPointer(window))[1];
 
     switch (edit->key_state) {
     case KeyStateNone:
@@ -357,6 +430,11 @@ void glfw_key_cb(GLFWwindow *window, int key, int scancode, int action,
                 }
             }
             break;
+        case GLFW_KEY_I:
+            if (action != GLFW_RELEASE) {
+                edit->key_state = KeyStateStartInput;
+            }
+            break;
         default:
             break;
         }
@@ -373,9 +451,21 @@ void glfw_key_cb(GLFWwindow *window, int key, int scancode, int action,
             }
             break;
         default:
+            edit->key_state = KeyStateNone;
             break;
         }
         break;
+    case KeyStateStartInput:
+    case KeyStateInput:
+        switch (key) {
+        case GLFW_KEY_ESCAPE:
+            if (action != GLFW_RELEASE) {
+                edit->key_state = KeyStateNone;
+            }
+            break;
+        default:
+            break;
+        }
     }
 }
 
@@ -387,10 +477,11 @@ int main(int argc, char *argv[]) {
         return -1;
     }
 
-    Arena *arena = new_arena(1024 * 1024 * 4, 1024 * 1024 * 64);
+    Arena *arena = new_arena(1024 * 1024 * 4, 1024 * 1024 * 128);
     Editor edit = {
         .max_block_cnt = DEFAULT_MAX_BLOCK_CNT,
         .block_size = DEFAULT_BLOCK_SIZE,
+        .small_block_size = DEFAULT_SMALL_BLOCK_SIZE,
         .line_size = DEFAULT_LINE_SIZE,
     };
     Context ctx = {0};
@@ -402,10 +493,12 @@ int main(int argc, char *argv[]) {
 
     init_ctx(&arena, &ctx, 1600, 800);
 
-    glfwSetWindowUserPointer(ctx.window, &edit);
+    void *user[] = {&edit, &arena};
+    glfwSetWindowUserPointer(ctx.window, user);
 
     glfwSetScrollCallback(ctx.window, glfw_scroll_cb);
     glfwSetKeyCallback(ctx.window, glfw_key_cb);
+    glfwSetCharCallback(ctx.window, glfw_char_cb);
 
     setup_bufs(&arena, &ctx, "unscii-8.bin", INIT_SCREEN_WIDTH,
                INIT_SCREEN_HEIGHT);
