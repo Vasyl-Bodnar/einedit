@@ -40,6 +40,7 @@ typedef struct Line {
     uint64_t live : 1;
 } Line;
 
+// TODO: Need to rework this to make writing possible
 typedef struct LineTable {
     size_t line_id;
     struct LineTable *next;
@@ -56,13 +57,21 @@ enum key_state {
     KeyStateNone = 0,
     KeyStateStartInput,
     KeyStateInput,
+    KeyStateCommand,
     KeyStateGo,
+};
+
+// For commands
+enum cmd_state {
+    CmdStateNone = 0,
+    CmdStateSave,
 };
 
 typedef struct Editor {
     int dirty;
     Cursor cursor;
     enum key_state key_state;
+    enum cmd_state cmd_state;
     size_t max_row;
 
     size_t file_size;
@@ -93,6 +102,7 @@ Block *load_block(Arena **arena, Editor *edit, size_t block_id) {
         arena,
         sizeof(Block) + sizeof(*edit->block_table->ptr) * edit->block_size,
         alignof(Block));
+    edit->block_table->size = edit->block_size;
     edit->block_table->id = block_id;
     edit->block_table->next = block_tab;
     edit->block_cnt += 1;
@@ -103,6 +113,9 @@ Block *load_block(Arena **arena, Editor *edit, size_t block_id) {
     assert((res == edit->block_size ||
             res == (edit->file_size - (block_id * edit->block_size))) &&
            "Could not read a File");
+    if (res != edit->block_size) {
+        edit->block_table->size = res;
+    }
 
     return edit->block_table;
 }
@@ -216,6 +229,21 @@ void open_editor(Arena **arena, Editor *edit, const char *path) {
 }
 
 void close_editor(Editor *edit) { fclose(edit->file_ptr); }
+
+void save_file(Editor *edit) {
+    [[maybe_unused]] size_t res;
+
+    Block *block = edit->block_table;
+    while (block) {
+        res = fseek(edit->file_ptr, block->id * edit->block_size, SEEK_SET);
+        assert(!res && "Could not seek a File");
+        res = fwrite(edit->block_table->ptr, 1, block->size, edit->file_ptr);
+        assert((res == edit->block_size ||
+                res == (edit->file_size - (block->id * edit->block_size))) &&
+               "Could not write to a File");
+        block = block->next;
+    }
+}
 
 // Convert a cursor position to a screen view
 void update_screen(Arena **arena, Editor *edit) {
@@ -331,7 +359,7 @@ void glfw_scroll_cb(GLFWwindow *window, double xoffset, double yoffset) {
     }
 }
 
-// TODO: This feels suboptimal and should probably not be in here
+// TODO: This feels suboptimal
 void glfw_char_cb(GLFWwindow *window, unsigned int code) {
     Editor *edit = ((Editor **)glfwGetWindowUserPointer(window))[0];
     Arena **arena = ((Arena ***)glfwGetWindowUserPointer(window))[1];
@@ -341,8 +369,10 @@ void glfw_char_cb(GLFWwindow *window, unsigned int code) {
         return;
     }
 
-    if (edit->key_state == KeyStateInput) {
+    else if (edit->key_state == KeyStateInput) {
+        // TODO: Should be combined with above for faster access
         Line line = find_line(arena, edit, edit->cursor.row);
+        Line next_line = find_line(arena, edit, edit->cursor.row + 1);
 
         if (!line.live) {
             return;
@@ -357,13 +387,29 @@ void glfw_char_cb(GLFWwindow *window, unsigned int code) {
         // FIXME: This idx is correct up to the new line, afterwards it
         // overwrites parts of the next line
         size_t idx = line.idx + edit->cursor.col;
+        if (idx > next_line.idx) {
+            idx = next_line.idx;
+            if (edit->cursor.row < edit->max_row) {
+                edit->cursor.row += 1;
+            }
+            edit->cursor.col = 0;
+        }
         Block *mods = block->mods;
         while (mods) {
             if (idx >= mods->offset &&
                 edit->small_block_size > (idx - mods->offset)) {
                 // FIXME: This converts 4 byte int to 1 byte char
-                mods->ptr[idx] = code;
-                printf("Added a char %c to %zu %d\n", code, idx, line.block_id);
+                mods->ptr[idx - mods->offset] = block->ptr[idx];
+                block->ptr[idx] = code;
+                if (edit->cursor.col < INIT_SCREEN_WIDTH - 1) {
+                    edit->cursor.col += 1;
+                } else {
+                    if (edit->cursor.row < edit->max_row) {
+                        edit->cursor.row += 1;
+                    }
+                    edit->cursor.col = 0;
+                }
+                edit->dirty = 1;
                 return;
             }
             mods = mods->next;
@@ -380,9 +426,19 @@ void glfw_char_cb(GLFWwindow *window, unsigned int code) {
         block->mods->size = 1;
         block->mods->offset = idx;
         block->mods->next = mods;
+
         // FIXME: This converts 4 byte int to 1 byte char
-        block->mods->ptr[idx] = code;
-        printf("Added a char %c to NEW %zu %d\n", code, idx, line.block_id);
+        block->mods->ptr[idx - block->mods->offset] = block->ptr[idx];
+        block->ptr[idx] = code;
+        if (edit->cursor.col < INIT_SCREEN_WIDTH - 1) {
+            edit->cursor.col += 1;
+        } else {
+            if (edit->cursor.row < edit->max_row) {
+                edit->cursor.row += 1;
+            }
+            edit->cursor.col = 0;
+        }
+        edit->dirty = 1;
     }
 }
 
@@ -433,6 +489,36 @@ void glfw_key_cb(GLFWwindow *window, int key, int scancode, int action,
         case GLFW_KEY_I:
             if (action != GLFW_RELEASE) {
                 edit->key_state = KeyStateStartInput;
+            }
+            break;
+        case GLFW_KEY_SEMICOLON:
+            if (action != GLFW_RELEASE && mods == GLFW_MOD_SHIFT) {
+                edit->key_state = KeyStateCommand;
+            }
+            break;
+        default:
+            break;
+        }
+        break;
+    case KeyStateCommand:
+        switch (key) {
+        case GLFW_KEY_W:
+            if (action != GLFW_RELEASE) {
+                edit->cmd_state = CmdStateSave;
+            }
+            break;
+        case GLFW_KEY_ENTER:
+            if (action != GLFW_RELEASE) {
+                switch (edit->cmd_state) {
+                case CmdStateNone:
+                    edit->key_state = KeyStateNone;
+                    break;
+                case CmdStateSave:
+                    save_file(edit);
+                    edit->key_state = KeyStateNone;
+                    edit->cmd_state = CmdStateNone;
+                    break;
+                }
             }
             break;
         default:
