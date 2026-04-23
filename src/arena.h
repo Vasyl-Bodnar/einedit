@@ -10,8 +10,6 @@ typedef struct Arena {
     size_t max_size;
     size_t cur;
     size_t old;
-    size_t save_cur; // for scratch arena // TODO: Probably just sublet instead
-    size_t save_old;
     struct Arena *next;
     char space[];
 } Arena;
@@ -29,10 +27,8 @@ void *alloc_align(Arena **arena, size_t size, size_t align);
 #define alloc_arr(arena, n, type)                                              \
     alloc_align(arena, sizeof(type) * n, alignof(type))
 
-// Start temporary, non-overlapping period
-void start_scratch(Arena *arena);
-// End temporary, non-overlapping period
-void end_scratch(Arena *arena);
+// Create a subarena
+Arena *sublet(Arena **arena, size_t size);
 
 // Resets arena to 0 allocations
 void free_all(Arena *arena);

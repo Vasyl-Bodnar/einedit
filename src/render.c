@@ -906,7 +906,6 @@ void transition_imgs(Arena **arena, Context *ctx, VkCommandBuffer cmd_buf,
                      VkPipelineStageFlagBits2 *dst_stages,
                      VkImageLayout *src_lays, VkImageLayout *dst_lays,
                      VkImage *imgs, uint32_t imgs_cnt) {
-    start_scratch(*arena);
     VkImageMemoryBarrier2 *barriers =
         alloc_arr(arena, imgs_cnt, VkImageMemoryBarrier2);
     for (size_t i = 0; i < imgs_cnt; i++) {
@@ -930,7 +929,6 @@ void transition_imgs(Arena **arena, Context *ctx, VkCommandBuffer cmd_buf,
     };
 
     vkCmdPipelineBarrier2(cmd_buf, &dep_info);
-    end_scratch(*arena);
 }
 
 void setup_img_buf(Context *ctx, VkExtent3D extent) {
@@ -1044,7 +1042,7 @@ void setup_screen(Context *ctx, uint32_t width, uint32_t height) {
 
 void setup_bufs(Arena **arena, Context *ctx, const char *font_path,
                 uint32_t width, uint32_t height) {
-    start_scratch(*arena);
+    // TODO: Preserve the header from the font
     FontLUT font = load_font(arena, font_path);
     // NOTE: Assumes font dimensions
     uint32_t font_bytes = font_type_to_bytes(font.type);
@@ -1059,7 +1057,6 @@ void setup_bufs(Arena **arena, Context *ctx, const char *font_path,
     setup_fontdata(ctx, font.data, font_bytes * font.code_cnt);
 
     update_desc(ctx, font_bytes * font.code_cnt);
-    end_scratch(*arena);
 }
 
 // Arena is used for temporary allocs only

@@ -1,4 +1,5 @@
 #include "arena.h"
+#include <stdalign.h>
 #include <stdio.h>
 #include <stdlib.h>
 
@@ -43,21 +44,11 @@ void *alloc_align(Arena **arena, size_t size, size_t align) {
     return (void *)ptr;
 }
 
-// TODO: These might not be the nicest api now
-void start_scratch(Arena *arena) {
-    if (arena) {
-        arena->save_cur = arena->cur;
-        arena->save_old = arena->old;
-        start_scratch(arena->next);
-    }
-}
-
-void end_scratch(Arena *arena) {
-    if (arena) {
-        arena->cur = arena->save_cur;
-        arena->old = arena->save_old;
-        end_scratch(arena->next);
-    }
+Arena *sublet(Arena **arena, size_t size) {
+    Arena *subunit = alloc_align(arena, sizeof(Arena) + size, alignof(Arena));
+    subunit->size = size;
+    subunit->max_size = 0;
+    return subunit;
 }
 
 void free_all(Arena *arena) {
@@ -68,7 +59,7 @@ void free_all(Arena *arena) {
     }
 }
 
-// TODO: What if initial on stack
+// TODO: What if initial is on the stack
 void delete_arena(Arena *arena) {
     if (arena) {
         Arena *next = arena->next;

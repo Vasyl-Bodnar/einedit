@@ -592,8 +592,11 @@ int main(int argc, char *argv[]) {
     open_editor(&arena, &edit, file_path);
     update_screen(&arena, &edit);
 
+    Arena *draw_arena = sublet(&arena, 1024);
+
     while (!glfwWindowShouldClose(ctx.window)) {
-        draw(&arena, &ctx, edit.screen, sizeof(edit.screen));
+        draw(&draw_arena, &ctx, edit.screen, sizeof(edit.screen));
+        free_all(draw_arena);
 
         update_screen(&arena, &edit);
 
