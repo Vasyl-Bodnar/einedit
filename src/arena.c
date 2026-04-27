@@ -25,8 +25,8 @@ void *alloc_align(Arena **arena, size_t size, size_t align) {
     uintptr_t ptr = (uintptr_t)arena_ref->space + arena_ref->cur;
     size_t real_align = (align - (ptr & (align - 1))) & (align - 1);
     ptr += real_align;
-    arena_ref->old = arena_ref->cur + align;
-    arena_ref->cur += size + align;
+    arena_ref->old = arena_ref->cur + real_align;
+    arena_ref->cur += size + real_align;
 
     if (arena_ref->cur > arena_ref->size) {
         if (arena_ref->max_size > arena_ref->size && size < arena_ref->size) {
