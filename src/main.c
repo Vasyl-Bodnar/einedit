@@ -6,10 +6,12 @@
 #include <GLFW/glfw3.h>
 
 // Default sizes and limits
-#define DEFAULT_LINE_SIZE (32 * 1024)
-#define DEFAULT_SMALL_BLOCK_SIZE (4 * 1024)
-#define DEFAULT_BLOCK_SIZE (1024 * 1024)
+#define DEFAULT_LINE_SIZE (4 * 1024)
+#define DEFAULT_SMALL_BLOCK_SIZE (1 * 1024)
+#define DEFAULT_BLOCK_SIZE (8 * 1024)
 #define DEFAULT_MAX_BLOCK_CNT (2 * 1024)
+
+#define CHILD_CNT 8
 
 #define INIT_SCREEN_WIDTH 100
 #define INIT_SCREEN_HEIGHT 30
@@ -24,28 +26,22 @@ enum block_kind {
 
 typedef struct Block {
     enum block_kind kind;
-    size_t size;   // for mods, max is editor->block_size
-    size_t offset; // for mods
-    size_t id;
-    struct Block *next;
+    size_t size; // for mods, max is editor->block_size
+    size_t idx;  // in the file, TODO: not the best idea
     struct Block *mods;
     char ptr[]; // From editor->block_size usually
 } Block;
 
-// NOTE: Some space potentially available here at a limit to id/idx
-// Or just allocate double more
-typedef struct Line {
-    uint64_t block_id : 32;
-    uint64_t idx : 31;
-    uint64_t live : 1;
-} Line;
+typedef struct LineInfo {
+    size_t min;
+    size_t max;
+    Block *block;
+} LineInfo;
 
-// TODO: Need to rework this to make writing possible
-typedef struct LineTable {
-    size_t line_id;
-    struct LineTable *next;
-    Line ptr[]; // From editor->line_size
-} LineTable;
+typedef struct LineTree {
+    struct LineInfo line;
+    struct LineTree *children[CHILD_CNT];
+} LineTree;
 
 typedef struct Cursor {
     size_t row;
@@ -72,7 +68,6 @@ typedef struct Editor {
     Cursor cursor;
     enum key_state key_state;
     enum cmd_state cmd_state;
-    size_t max_row;
 
     size_t file_size;
     FILE *file_ptr;
@@ -80,134 +75,122 @@ typedef struct Editor {
     const size_t small_block_size;
     const size_t block_size;
     const size_t max_block_cnt;
-    size_t block_cnt;
-    Block *block_table;
-
-    const size_t line_size;
-    size_t line_cnt;
-    LineTable *line_table;
+    LineTree *tree;
 
     uint32_t screen[INIT_SCREEN_WIDTH * INIT_SCREEN_HEIGHT];
 } Editor;
 
 // NOTE: Assumes the block is not already loaded
-Block *load_block(Arena **arena, Editor *edit, size_t block_id) {
+Block *load_block(Arena **arena, Editor *edit, size_t block_idx) {
     [[maybe_unused]] size_t res;
 
-    assert(edit->max_block_cnt > edit->block_cnt &&
-           "TODO: Setup a bit of garbage collection for blocks");
-
-    Block *block_tab = edit->block_table;
-    edit->block_table = alloc_align(
-        arena,
-        sizeof(Block) + sizeof(*edit->block_table->ptr) * edit->block_size,
+    Block *block = alloc_align(
+        arena, sizeof(Block) + sizeof(*block->ptr) * edit->block_size,
         alignof(Block));
-    edit->block_table->size = edit->block_size;
-    edit->block_table->id = block_id;
-    edit->block_table->next = block_tab;
-    edit->block_cnt += 1;
+    block->size = edit->block_size;
+    block->idx = block_idx;
 
-    res = fseek(edit->file_ptr, block_id * edit->block_size, SEEK_SET);
+    res = fseek(edit->file_ptr, block_idx * edit->block_size, SEEK_SET);
     assert(!res && "Could not seek a File");
-    res = fread(edit->block_table->ptr, 1, edit->block_size, edit->file_ptr);
+    res = fread(block->ptr, 1, edit->block_size, edit->file_ptr);
     assert((res == edit->block_size ||
-            res == (edit->file_size - (block_id * edit->block_size))) &&
+            res == (edit->file_size - (block_idx * edit->block_size))) &&
            "Could not read a File");
     if (res != edit->block_size) {
-        edit->block_table->size = res;
+        block->size = res;
     }
 
-    return edit->block_table;
+    return block;
 }
 
-Block *find_block(Arena **arena, Editor *edit, size_t block_id) {
-    if (block_id > edit->file_size / edit->block_size) {
+size_t get_block_line(Block *block, size_t line) {
+    if (line == SIZE_MAX) {
+        size_t max = 0;
+        for (size_t i = 0; i < block->size; i++) {
+            if (block->ptr[i] == '\n') {
+                max += 1;
+            }
+        }
+        return max;
+    }
+
+    if (!line) {
         return 0;
     }
 
-    Block *block_tab = edit->block_table;
-    while (block_tab) {
-        if (block_tab->id == block_id) {
-            return block_tab;
+    size_t cnt = 0;
+    for (size_t i = 0; i < block->size; i++) {
+        if (block->ptr[i] == '\n') {
+            cnt += 1;
+            if (cnt == line) {
+                return i;
+            }
         }
-        block_tab = block_tab->next;
     }
 
-    return load_block(arena, edit, block_id);
+    return 0;
 }
 
-// Gets a line table from the block(s)
-// TODO: Loading the all blocks up to this line_id, not ideal
-// TODO: Currently this practically assumes there is one line table
-LineTable *load_line(Arena **arena, Editor *edit, size_t line_id) {
-    LineTable *line_tab = edit->line_table;
-    edit->line_table = alloc_align(
-        arena,
-        sizeof(LineTable) + sizeof(*edit->line_table->ptr) * edit->line_size,
-        alignof(LineTable));
-    edit->line_table->line_id = line_id;
-    edit->line_table->next = line_tab;
+LineInfo find_line(LineTree *tree, size_t line) {
+    if (line >= tree->line.min && line <= tree->line.max) {
+        if (tree->line.block) {
+            return tree->line;
+        }
 
-    // First line is assumed and does not have a physical \n
-    edit->line_table->ptr[0].block_id = 0;
-    edit->line_table->ptr[0].idx = 0;
-    edit->line_table->ptr[0].live = 1;
+        LineTree *child;
+        for (size_t i = 0; i < CHILD_CNT; i++) {
+            child = tree->children[i];
+            if (child && child->line.block && line >= child->line.min &&
+                line <= child->line.max) {
+                return child->line;
+            }
+        }
+    }
 
-    size_t line_idx = 1;
-    for (size_t i = 0; i < edit->file_size / edit->block_size; i++) {
-        Block *block = find_block(arena, edit, i);
-        for (size_t j = 0; j < edit->block_size; j++) {
-            if (block->ptr[j] == '\n') {
-                edit->line_table->ptr[line_idx].block_id = i;
-                edit->line_table->ptr[line_idx].idx = j + 1;
-                edit->line_table->ptr[line_idx].live = 1;
-                line_idx += 1;
-                if (line_idx == edit->line_size) {
-                    return edit->line_table;
+    LineInfo found;
+    for (size_t i = 0; i < CHILD_CNT; i++) {
+        if (!tree->children[i]) {
+            return (LineInfo){0};
+        }
+        found = find_line(tree->children[i], line);
+        if (found.block) {
+            return found;
+        }
+    }
+
+    return (LineInfo){0};
+}
+
+LineInfo load_line(Arena **arena, Editor *edit, size_t line) {
+    if (!edit->tree) {
+        edit->tree = alloc(arena, LineTree);
+        edit->tree->line.block = load_block(arena, edit, 0);
+        edit->tree->line.min = 0;
+        edit->tree->line.max = get_block_line(edit->tree->line.block, SIZE_MAX);
+    }
+
+    // TODO: Redo
+    LineTree *tree = edit->tree;
+    LineTree *child;
+    while (line > tree->line.max) {
+        for (size_t i = 0; i < CHILD_CNT; i++) {
+            if (!tree->children[i]) {
+                tree->children[i] = alloc(arena, LineTree);
+                child = tree->children[i];
+                child->line.block = load_block(arena, edit, i);
+                child->line.min = tree->line.max;
+                child->line.max = get_block_line(child->line.block, SIZE_MAX);
+
+                tree->line.max = child->line.max;
+
+                if (child->line.max >= line) {
+                    return child->line;
                 }
             }
         }
     }
 
-    Block *block = find_block(arena, edit, edit->file_size / edit->block_size);
-    for (size_t j = 0; j < edit->file_size % edit->block_size; j++) {
-        if (block->ptr[j] == '\n') {
-            edit->line_table->ptr[line_idx].block_id =
-                edit->file_size / edit->block_size;
-            edit->line_table->ptr[line_idx].idx = j + 1;
-            edit->line_table->ptr[line_idx].live = 1;
-            line_idx += 1;
-            if (line_idx == edit->line_size) {
-                return edit->line_table;
-            }
-        }
-    }
-
-    edit->max_row = line_id * edit->line_size + line_idx;
-
-    return edit->line_table;
-}
-
-Line find_line(Arena **arena, Editor *edit, size_t line) {
-    if (line >= edit->file_size) {
-        return (Line){0};
-    }
-
-    if (!line) {
-        return (Line){.block_id = 0, .idx = 0, .live = 1};
-    }
-
-    size_t target_id = line / edit->line_size;
-    size_t target_idx = line % edit->line_size;
-    LineTable *line_tab = edit->line_table;
-    while (line_tab) {
-        if (line_tab->line_id == target_id) {
-            return line_tab->ptr[target_idx];
-        }
-        line_tab = line_tab->next;
-    }
-
-    return load_line(arena, edit, target_id)->ptr[target_idx];
+    return find_line(edit->tree, line);
 }
 
 void open_editor(Arena **arena, Editor *edit, const char *path) {
@@ -230,6 +213,7 @@ void open_editor(Arena **arena, Editor *edit, const char *path) {
 
 void close_editor(Editor *edit) { fclose(edit->file_ptr); }
 
+/* TODO: Redo
 void save_file(Editor *edit) {
     [[maybe_unused]] size_t res;
 
@@ -244,6 +228,7 @@ void save_file(Editor *edit) {
         block = block->next;
     }
 }
+*/
 
 // Convert a cursor position to a screen view
 void update_screen(Arena **arena, Editor *edit) {
@@ -251,43 +236,36 @@ void update_screen(Arena **arena, Editor *edit) {
         return;
     }
 
-    Line line_idx;
-    if (edit->cursor.row > (INIT_SCREEN_HEIGHT / 2) - 1) {
-        line_idx =
-            find_line(arena, edit, edit->cursor.row - (INIT_SCREEN_HEIGHT / 2));
-    } else {
-        line_idx = find_line(arena, edit, 0);
-    }
-    if (!line_idx.live) {
+    size_t cur_line = (edit->cursor.row > (INIT_SCREEN_HEIGHT / 2) - 1)
+                          ? edit->cursor.row - (INIT_SCREEN_HEIGHT / 2)
+                          : 0;
+    LineInfo line_info = load_line(arena, edit, cur_line);
+    if (!line_info.block) {
         return;
     }
 
     edit->dirty = 0;
 
-    size_t block_id = line_idx.block_id;
-    size_t init_idx = line_idx.idx;
-    char *block = find_block(arena, edit, block_id)->ptr;
-    for (size_t i = 0, j = init_idx; i < INIT_SCREEN_WIDTH * INIT_SCREEN_HEIGHT;
-         j++) {
-        if (j * block_id > edit->file_size) {
+    Block *block = line_info.block;
+    for (size_t i = 0, j = 0; i < INIT_SCREEN_WIDTH * INIT_SCREEN_HEIGHT; j++) {
+        if (j * block->idx > edit->file_size) {
             for (; i < INIT_SCREEN_WIDTH * INIT_SCREEN_HEIGHT; i++) {
                 edit->screen[i] = 0;
             }
             return;
         } else if (j >= edit->block_size) {
             j = 0;
-            block_id += 1;
-            Block *bl = find_block(arena, edit, block_id);
-            if (!bl) {
+            LineInfo info = load_line(arena, edit, cur_line);
+            if (!info.block) {
                 for (; i < INIT_SCREEN_WIDTH * INIT_SCREEN_HEIGHT; i++) {
                     edit->screen[i] = 0;
                 }
                 return;
             }
-            block = bl->ptr;
+            block = info.block;
         }
 
-        switch (block[j]) {
+        switch (block->ptr[j]) {
         case '\t':
             for (size_t tmp = i;
                  i < tmp + TAB_SIZE &&
@@ -297,6 +275,7 @@ void update_screen(Arena **arena, Editor *edit) {
             }
             break;
         case '\n':
+            cur_line += 1;
             for (size_t tmp = i;
                  i < tmp + (INIT_SCREEN_WIDTH - (tmp % INIT_SCREEN_WIDTH));
                  i++) {
@@ -304,7 +283,7 @@ void update_screen(Arena **arena, Editor *edit) {
             }
             break;
         default:
-            edit->screen[i++] = (uint32_t)block[j];
+            edit->screen[i++] = (uint32_t)block->ptr[j];
             break;
         }
     }
@@ -331,7 +310,7 @@ void glfw_scroll_cb(GLFWwindow *window, double xoffset, double yoffset) {
 
     // Could work a bit more on this to make it smoother
     if (yoffset < 0) {
-        if (edit->cursor.row < edit->max_row) {
+        if (edit->cursor.row <= edit->tree->line.max) {
             edit->cursor.row += 1;
             edit->dirty = 1;
         }
@@ -371,69 +350,22 @@ void glfw_char_cb(GLFWwindow *window, unsigned int code) {
 
     else if (edit->key_state == KeyStateInput) {
         // TODO: Should be combined with above for faster access
-        Line line = find_line(arena, edit, edit->cursor.row);
-        Line next_line = find_line(arena, edit, edit->cursor.row + 1);
+        LineInfo line = load_line(arena, edit, edit->cursor.row);
+        Block *block = line.block;
 
-        if (!line.live) {
-            return;
-        }
-
-        Block *block = find_block(arena, edit, line.block_id);
         if (!block) {
             // TODO: Possibly EOF, should create a new block here then
             return;
         }
 
-        // FIXME: This idx is correct up to the new line, afterwards it
-        // overwrites parts of the next line
-        size_t idx = line.idx + edit->cursor.col;
-        if (idx > next_line.idx) {
-            idx = next_line.idx;
-            if (edit->cursor.row < edit->max_row) {
-                edit->cursor.row += 1;
-            }
-            edit->cursor.col = 0;
-        }
-        Block *mods = block->mods;
-        while (mods) {
-            if (idx >= mods->offset &&
-                edit->small_block_size > (idx - mods->offset)) {
-                // FIXME: This converts 4 byte int to 1 byte char
-                mods->ptr[idx - mods->offset] = block->ptr[idx];
-                block->ptr[idx] = code;
-                if (edit->cursor.col < INIT_SCREEN_WIDTH - 1) {
-                    edit->cursor.col += 1;
-                } else {
-                    if (edit->cursor.row < edit->max_row) {
-                        edit->cursor.row += 1;
-                    }
-                    edit->cursor.col = 0;
-                }
-                edit->dirty = 1;
-                return;
-            }
-            mods = mods->next;
-        }
-
-        mods = block->mods;
-        block->mods =
-            alloc_align(arena,
-                        sizeof(Block) + sizeof(*edit->block_table->ptr) *
-                                            edit->small_block_size,
-                        alignof(Block));
-        block->mods->kind = ModAdd;
-        block->mods->id = block->id;
-        block->mods->size = 1;
-        block->mods->offset = idx;
-        block->mods->next = mods;
-
-        // FIXME: This converts 4 byte int to 1 byte char
-        block->mods->ptr[idx - block->mods->offset] = block->ptr[idx];
+        // TODO: Proper idx
+        size_t nl = get_block_line(block, edit->cursor.row);
+        size_t idx = nl + edit->cursor.col + 1;
         block->ptr[idx] = code;
         if (edit->cursor.col < INIT_SCREEN_WIDTH - 1) {
             edit->cursor.col += 1;
         } else {
-            if (edit->cursor.row < edit->max_row) {
+            if (edit->cursor.row < edit->tree->line.max) {
                 edit->cursor.row += 1;
             }
             edit->cursor.col = 0;
@@ -451,7 +383,8 @@ void glfw_key_cb(GLFWwindow *window, int key, int scancode, int action,
     case KeyStateNone:
         switch (key) {
         case GLFW_KEY_J:
-            if (action != GLFW_RELEASE && edit->cursor.row < edit->max_row) {
+            if (action != GLFW_RELEASE &&
+                edit->cursor.row < edit->tree->line.max) {
                 edit->cursor.row += 1;
                 edit->dirty = 1;
             }
@@ -478,7 +411,8 @@ void glfw_key_cb(GLFWwindow *window, int key, int scancode, int action,
         case GLFW_KEY_G:
             if (action != GLFW_RELEASE) {
                 if (mods == GLFW_MOD_SHIFT) {
-                    edit->cursor.row = edit->max_row ? edit->max_row - 1 : 0;
+                    edit->cursor.row =
+                        edit->tree->line.max ? edit->tree->line.max - 1 : 0;
                     edit->cursor.col = 0;
                     edit->dirty = 1;
                 } else {
@@ -514,7 +448,7 @@ void glfw_key_cb(GLFWwindow *window, int key, int scancode, int action,
                     edit->key_state = KeyStateNone;
                     break;
                 case CmdStateSave:
-                    save_file(edit);
+                    // save_file(edit);
                     edit->key_state = KeyStateNone;
                     edit->cmd_state = CmdStateNone;
                     break;
@@ -568,7 +502,6 @@ int main(int argc, char *argv[]) {
         .max_block_cnt = DEFAULT_MAX_BLOCK_CNT,
         .block_size = DEFAULT_BLOCK_SIZE,
         .small_block_size = DEFAULT_SMALL_BLOCK_SIZE,
-        .line_size = DEFAULT_LINE_SIZE,
     };
     Context ctx = {0};
 
